@@ -5,11 +5,14 @@ temp 目录 store 往返），源码模式打印 stdout+退出码；windowed exe
 以退出码表达结果并把同样输出写 %TEMP%/pc-quote-flow-selftest.log（R22⑦，Task 10 依赖）。
 
 MainWindow：工具栏（当前操作人/打开/保存/设置/切换操作人 + 三种导出按钮）+
-视图 tab（销售|采购|审阅；采购/审阅本任务占位，Task 9 替换）+ 销售视图四数面板。
+视图 tab（销售|采购|审阅，Task 9 起均为真实视图）+ 销售视图四数面板。
 所有写操作经 identity.make_stamp 新鲜对象记日志，只增不改（红线4/R22⑧）；
 无权限门禁：低于底价仅红字警告+导出前一次确认，导出按钮永不 disable（红线2）。
 打开文件哈希不一致 → 提示"程序外被修改"+一条打开留痕（R15/R22⑤）。
 导出成功 → 调用方 store.save 递增工作文件版本（R20⑧：exports 自身不 save）。
+Task 9：采购视图（双底价/真实利润）＋审阅视图（只读/审批摘要/日志表）＋审批意见
+写回链（record_approval 内部留痕，调用方不双重 append，R18①）＋对照打开第二窗口；
+留痕 view 一律 current_view() 长名（R23①）。
 """
 import json
 import os
@@ -23,13 +26,15 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QLabel, QMainWindow, QMessageBox,
-    QPushButton, QTabWidget, QToolBar, QVBoxLayout, QWidget,
+    QPushButton, QTabWidget, QToolBar,
 )
 
-from .. import exports, identity, pricing, store, tax
+from .. import exports, identity, pricing, review, store, tax
 from ..money import pct2
 from ..model import QuoteDoc, QuoteLine
 from .dialogs import RegisterDialog, ReverseDialog, SettingsDialog
+from .purchase_view import PurchaseView
+from .review_view import ReviewView
 from .sales_view import SalesView
 
 _MODE_CN = {"markup": "成本加成", "margin": "销售毛利率"}
@@ -164,29 +169,23 @@ def _save_settings(mode: str, days: int) -> None:
         pass
 
 
-def _placeholder(text: str) -> QWidget:
-    """采购/审阅 tab 占位（Task 9 替换，本任务不实现其逻辑，R22⑨）。"""
-    w = QWidget()
-    lay = QVBoxLayout(w)
-    lab = QLabel(text)
-    lab.setAlignment(Qt.AlignCenter)
-    lay.addWidget(lab)
-    return w
-
-
 class MainWindow(QMainWindow):
-    """主窗口：工具栏 + 视图 tab + 销售视图；统一 refresh_pricing 刷新四数。"""
+    """主窗口：工具栏 + 三视图 tab；统一 refresh_pricing 刷新四数/双底价/审批摘要。"""
 
-    def __init__(self, path: Path | None = None, parent=None):
+    def __init__(self, path: Path | None = None, parent=None, *,
+                 doc: QuoteDoc | None = None, profile: identity.Profile | None = None):
+        """path：启动即载入；doc/profile：对照打开第二窗口时注入已载入文档与同一
+        注册身份（Task 9），缺省走新建/登记原路径（向后兼容，取消登记语义不变）。"""
         super().__init__(parent)
         self.p = tax.TaxProfile()
         self.path: Path | None = None
+        self._compare_windows: list["MainWindow"] = []  # 对照打开的第二窗口（M4 生命周期）
         # 首次运行：load_profile 损坏一律 None；APPDATA 缺失抛 KeyError 视为首次运行（R17②/R22④）
-        profile: identity.Profile | None = None
-        try:
-            profile = identity.load_profile()
-        except KeyError:
-            profile = None
+        if profile is None:
+            try:
+                profile = identity.load_profile()
+            except KeyError:
+                profile = None
         if profile is None:
             dlg = RegisterDialog(self)
             if dlg.exec() != QDialog.Accepted or dlg.profile is None:
@@ -194,12 +193,17 @@ class MainWindow(QMainWindow):
             profile = dlg.profile
         self.profile: identity.Profile = profile  # 构造成功后恒非 None（取消路径已提前返回）
         self.default_mode, self.valid_days = _load_settings()
-        self.doc = self._make_new_doc()
+        self.doc = doc if doc is not None else self._make_new_doc()
         self._build_ui()
         self._sync_rate_controls()
         self.refresh_pricing()
         if path is not None:
-            self.load_file(Path(path))
+            if doc is None:
+                self.load_file(Path(path))
+            else:
+                # 注入 doc 已预先载入（对照打开）：只记路径，不重复 load
+                self.path = Path(path)
+                self._update_title()
 
     # ---- 构建 ----
     def _make_new_doc(self) -> QuoteDoc:
@@ -231,9 +235,11 @@ class MainWindow(QMainWindow):
             tb.addWidget(b)  # 永不 disable（红线2：无权限门禁）
         self.tabs = QTabWidget()
         self.sales_view = SalesView(self.doc, self.p)
+        self.purchase_view = PurchaseView(self.doc, self.p)
+        self.review_view = ReviewView(self.doc, self.p)
         self.tabs.addTab(self.sales_view, "销售")
-        self.tabs.addTab(_placeholder("采购视图（Task 9 实现）"), "采购")
-        self.tabs.addTab(_placeholder("审阅视图（Task 9 实现）"), "审阅")
+        self.tabs.addTab(self.purchase_view, "采购")
+        self.tabs.addTab(self.review_view, "审阅")
         self.setCentralWidget(self.tabs)
         # 四数/利润率控件引用（与销售视图同一对象，便于统一刷新与测试定位）
         self.lbl_floor = self.sales_view.lbl_floor
@@ -250,6 +256,9 @@ class MainWindow(QMainWindow):
         self.combo_mode.currentTextChanged.connect(self._on_mode_changed)
         self.btn_reverse.clicked.connect(self._open_reverse)
         self.sales_view.model.edited.connect(self._on_model_edited)
+        self.purchase_view.model.edited.connect(self._on_model_edited)
+        self.review_view.approval_requested.connect(self._on_approval_requested)
+        self.review_view.compare_requested.connect(self._open_compare)
         self.btn_open.clicked.connect(self._open_file_dialog)
         self.btn_save.clicked.connect(lambda: self.save_file())
         self.btn_settings.clicked.connect(self._open_settings)
@@ -273,35 +282,47 @@ class MainWindow(QMainWindow):
             f"{loc} ｜ 状态：{self.doc.status} ｜ 有效期至：{self.doc.valid_until or '—'} ｜ v{self.doc.version}"
         )
 
-    # ---- 统一刷新（R22②③：一切刷新走 price_doc）----
+    # ---- 统一刷新（R22②③：一切刷新走 price_doc；Task 9 三视图同步）----
     def refresh_pricing(self) -> None:
         dp = None
         if self.doc.lines:
             try:
                 dp = pricing.price_doc(self.doc.lines, self.doc.mode, self.doc.unified_rate, self.p)
             except (ValueError, ArithmeticError) as e:
-                self.sales_view.show_calc_error(str(e))
-                self.sales_view.model.refresh()
-                self._update_title()
+                self._show_calc_error(str(e))
                 return
             # NaN 传播不抛异常（fen(NaN)=NaN），但 set_pricing 的 q<f 比较会抛
             # InvalidOperation：守卫扩到 set_pricing 之前，非有限结果走计算错误通道（R23②）
             if not (dp.quote.is_finite() and dp.floor.is_finite()
                     and dp.profit_excl.is_finite() and dp.markup.is_finite()
                     and dp.margin.is_finite()):
-                self.sales_view.show_calc_error("存在非有限数值（NaN/Infinity），请检查利润率/发票类型")
-                self.sales_view.model.refresh()
-                self._update_title()
+                self._show_calc_error("存在非有限数值（NaN/Infinity），请检查利润率/发票类型")
                 return
         self.sales_view.set_pricing(dp)
+        self.purchase_view.set_pricing(dp)
+        self.review_view.refresh_summary()
         self.sales_view.model.refresh()
+        self.purchase_view.model.refresh()
+        self.review_view.model.refresh()
+        self._update_title()
+
+    def _show_calc_error(self, msg: str) -> None:
+        """计算错误降级：三视图同步错误面板，明细模型仍刷新（不崩）。"""
+        self.sales_view.show_calc_error(msg)
+        self.purchase_view.show_calc_error(msg)
+        self.review_view.show_calc_error(msg)
+        self.sales_view.model.refresh()
+        self.purchase_view.model.refresh()
+        self.review_view.model.refresh()
         self._update_title()
 
     def _sync_rate_controls(self) -> None:
         """doc → 利润率输入/模式下拉（阻塞信号避免回环）。"""
         self.txt_rate.blockSignals(True)
         self.combo_mode.blockSignals(True)
-        self.txt_rate.setText(str(pct2(self.doc.unified_rate)))
+        # NM2：非有限 unified_rate 显示降级不抛（pct2(Infinity) 抛 InvalidOperation）
+        r = self.doc.unified_rate
+        self.txt_rate.setText(str(pct2(r)) if r.is_finite() else "—")
         self.combo_mode.setCurrentText(_MODE_CN[self.doc.mode])
         self.txt_rate.blockSignals(False)
         self.combo_mode.blockSignals(False)
@@ -320,7 +341,10 @@ class MainWindow(QMainWindow):
             self._sync_rate_controls()
             return
         rate = pct / 100  # 百分比输入口径（R22③：输 10 → 0.10）
-        if pct == pct2(self.doc.unified_rate):
+        # NM2：旧率非有限时 pct2 会抛——显示口径判等仅在旧率有限时进行；
+        # 非有限旧率视为"显示已降级"，合法新输入直接写回（恢复路径）
+        old_rate = self.doc.unified_rate
+        if old_rate.is_finite() and pct == pct2(old_rate):
             # 判等用显示口径（R23③）：editingFinished 亦由焦点离开发送（文本未改），
             # 若以全精度判等，反算写回的全精度率会被显示舍入值静默覆盖（违红线3）；
             # 显示回读不写 doc、不记日志，内部全精度值永不因显示回读降精度
@@ -329,13 +353,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "利润率", "毛利率模式的利润率必须小于 100%")
             self._sync_rate_controls()
             return
-        if rate == self.doc.unified_rate:
+        if rate == old_rate:
             return
-        old = self.doc.unified_rate
         self.doc.unified_rate = rate
+        old_disp = str(pct2(old_rate)) if old_rate.is_finite() else "—"  # NM2 守卫
         self.doc.logs.append(identity.make_stamp(
             self.profile, view=self.current_view(), action="修改利润率",
-            summary=f"统一利润率 {pct2(old)}%→{pct2(rate)}%", version=self.doc.version,
+            summary=f"统一利润率 {old_disp}%→{pct2(rate)}%", version=self.doc.version,
         ))
         self.refresh_pricing()
 
@@ -343,10 +367,19 @@ class MainWindow(QMainWindow):
         mode = _CN_MODE.get(text)
         if mode is None or mode == self.doc.mode:
             return
-        if mode == "margin" and self.doc.unified_rate >= 1:
-            QMessageBox.warning(self, "利润率", "毛利率模式的利润率必须小于 100%，请先调低利润率")
-            self._sync_rate_controls()
-            return
+        # NM2：NaN>=1 比较抛 InvalidOperation——切毛利率时旧率非有限则无法校验
+        # rate<100%，拦截回退（中文警告不抛）；有限旧率走原范围检查
+        if mode == "margin":
+            r = self.doc.unified_rate
+            if not r.is_finite():
+                QMessageBox.warning(self, "利润率",
+                                    "当前利润率非有限（NaN/Infinity），无法切换毛利率模式，请先修正利润率")
+                self._sync_rate_controls()
+                return
+            if r >= 1:
+                QMessageBox.warning(self, "利润率", "毛利率模式的利润率必须小于 100%，请先调低利润率")
+                self._sync_rate_controls()
+                return
         old = self.doc.mode
         self.doc.mode = mode
         self.doc.logs.append(identity.make_stamp(
@@ -376,11 +409,58 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "反算写回", f"无法反算写回：{e}")
             return
         self.doc.logs.append(identity.make_stamp(
-            self.profile, view="销售", action="反算写回",
+            self.profile, view=self.current_view(), action="反算写回",
             summary=summary, version=self.doc.version,
         ))
         self._sync_rate_controls()
         self.refresh_pricing()
+
+    # ---- 审批写回 / 对照打开（Task 9）----
+    def _on_approval_requested(self, conclusion: str, opinion: str) -> None:
+        """ApprovalDialog 提交 → 新鲜盖章 + review.record_approval。
+
+        record_approval 内部已 append「审批记录」日志并经 states.transition 流转，
+        调用方绝不重复 append（R18①）。审批只记录不做门禁（红线2）。
+        """
+        round_no = len(self.doc.approvals) + 1
+        stamp = identity.make_stamp(
+            self.profile, view=self.current_view(), action="审批记录",
+            summary=f"第{round_no}轮审批：{conclusion}；意见：{opinion or '无'}",
+            version=self.doc.version,
+        )
+        try:
+            review.record_approval(self.doc, conclusion, opinion, stamp, self.p)
+        except ValueError as e:  # 结论非法（combo 限三选，纵深守卫）
+            QMessageBox.warning(self, "审批记录", f"无法记录审批：{e}")
+            return
+        self.refresh_pricing()
+
+    def _open_compare(self) -> None:
+        """对照打开：选第二份文件 → 新 MainWindow（同一 profile）；失败中文提示不崩溃。"""
+        path, _ = QFileDialog.getOpenFileName(self, "对照打开（第二份报价文件）", "",
+                                              "Excel 文件 (*.xlsx *.bak);;所有文件 (*)")
+        if not path:
+            return
+        try:
+            second_doc, warnings = store.load(Path(path))
+        except Exception as e:  # StoreError/FileNotFoundError/损坏文件等：中文提示不崩溃
+            QMessageBox.critical(self, "对照打开失败", f"无法打开文件：{e}")
+            return
+        if warnings:
+            summary = "；".join(warnings)
+            QMessageBox.warning(self, "打开文件", summary)
+            second_doc.logs.append(identity.make_stamp(
+                self.profile, view=self.current_view(), action="打开文件",
+                summary=summary, version=second_doc.version,
+            ))
+        win = MainWindow(path=Path(path), doc=second_doc, profile=self.profile)
+        win.setAttribute(Qt.WA_DeleteOnClose)  # 第二窗口关闭即销毁（M4）
+        win.destroyed.connect(
+            lambda *_: self._compare_windows.remove(win)
+            if win in self._compare_windows else None
+        )
+        self._compare_windows.append(win)  # 持引用防提前 GC；destroyed 时移除
+        win.show()
 
     # ---- 打开/保存（R15/R22⑤：外部改动留痕；store 原子保存）----
     def load_file(self, path: Path) -> None:
@@ -403,6 +483,10 @@ class MainWindow(QMainWindow):
             ))
         self.sales_view.set_doc(doc)
         self.sales_view.model.edited.connect(self._on_model_edited)
+        # Task 9：采购视图同样重建模型＋重连 edited；审阅视图只读重建＋摘要刷新
+        self.purchase_view.set_doc(doc)
+        self.purchase_view.model.edited.connect(self._on_model_edited)
+        self.review_view.set_doc(doc)
         self._sync_rate_controls()
         self.refresh_pricing()
 

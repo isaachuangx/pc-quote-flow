@@ -150,6 +150,12 @@ class QuoteTableModel(QAbstractTableModel):
         old = getattr(ln, field)
         if new == old:
             return False
+        # 显示口径 no-op 守卫（NM1，镜像 app._on_rate_edited）：pct? 列双击回车
+        # 会按 pct2 预填的舍入值改写全精度率（如 0.12345→0.12）；显示不变则不写不记。
+        # isinstance 收窄：None（空率/清空）显示口径不同，属真实变更，放行。
+        if (kind == "pct?" and isinstance(new, Decimal) and isinstance(old, Decimal)
+                and pct2(new) == pct2(old)):
+            return False
         old_disp = self.data(index, Qt.DisplayRole)
         setattr(ln, field, new)
         self.dataChanged.emit(index, index)

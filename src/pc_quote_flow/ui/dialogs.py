@@ -1,13 +1,16 @@
-"""对话框（Task 8）：首次运行登记 / 反算写回 / 设置。
+"""对话框（Task 8/9）：首次运行登记 / 反算写回 / 设置 / 审批意见。
 
 登记与设置经 identity.save_profile 写 profile.json（四字段齐全，R17①/R22④）；
 反算写回对话框只发 writeback_requested(目标价) 信号——apply_reverse+新鲜盖章+
 append 一条+refresh 由 MainWindow 按 R22① 完成（对话框不写日志，避免双重 append）。
+审批意见对话框（Task 9）只发 approval_requested(结论,意见) 信号——新鲜盖章+
+review.record_approval（内部已留痕）由 MainWindow 完成（R18① 不双重留痕）。
+非模态对话框均设 WA_DeleteOnClose，关闭即销毁防子对象累积（M4）。
 全部中文文案；身份只做留痕不做权限（红线2）。
 """
 from decimal import Decimal, InvalidOperation
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
@@ -76,6 +79,53 @@ class RegisterDialog(QDialog):
         super().accept()
 
 
+class ApprovalDialog(QDialog):
+    """审批意见（Task 9）：结论 同意|驳回|需调整 ＋ 意见 → approval_requested 信号。
+
+    非模态 show()；写回链在 MainWindow：identity.make_stamp 新鲜盖章 →
+    review.record_approval(doc, conclusion, opinion, stamp, p)（内部置状态并 append
+    一条日志，调用方绝不重复 append，R18①）。审批仅记录，不做权限门禁（红线2）。
+    """
+
+    approval_requested = Signal(str, str)  # (结论, 意见)
+
+    def __init__(self, doc: QuoteDoc, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose)  # 关闭即销毁，防非模态子对象累积（M4）
+        self.doc = doc
+        self.setWindowTitle("填写审批意见（仅记录，不做权限门禁）")
+        self.lbl_current = QLabel(f"当前状态：{doc.status}｜审批状态：{doc.approval_status}")
+        self.combo_conclusion = QComboBox()
+        self.combo_conclusion.addItems(["同意", "驳回", "需调整"])
+        self.txt_opinion = QLineEdit()
+        self.txt_opinion.setPlaceholderText("审批意见（可空）")
+        self.btn_ok = QPushButton("提交审批意见")
+        self.btn_cancel = QPushButton("取消")
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        form = QFormLayout()
+        form.addRow("审批结论：", self.combo_conclusion)
+        form.addRow("审批意见：", self.txt_opinion)
+        hint = QLabel("结论与意见记入审批记录（多轮只增不改）并流转状态备忘；"
+                      "程序不做审批决策，不拦截任何操作。")
+        hint.setWordWrap(True)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self.btn_ok)
+        row.addWidget(self.btn_cancel)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.lbl_current)
+        lay.addLayout(form)
+        lay.addWidget(hint)
+        lay.addLayout(row)
+
+    def accept(self) -> None:
+        # combo 限定三结论（record_approval 内部再校验）；意见去首尾空白
+        self.approval_requested.emit(self.combo_conclusion.currentText(),
+                                     self.txt_opinion.text().strip())
+        super().accept()
+
+
 class ReverseDialog(QDialog):
     """反算写回（附录B.4）：输入谈妥的整机报价→预览两率与利润→"写回"发信号。
 
@@ -86,6 +136,7 @@ class ReverseDialog(QDialog):
 
     def __init__(self, doc: QuoteDoc, p: TaxProfile, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose)  # 关闭即销毁，防非模态子对象累积（M4）
         self.doc = doc
         self.p = p
         self.setWindowTitle("反算写回（输入谈妥的整机报价）")

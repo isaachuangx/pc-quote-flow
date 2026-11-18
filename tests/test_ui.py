@@ -157,7 +157,7 @@ def test_reverse_writeback(qtbot, reg_profile):
     last = win.doc.logs[-1]
     assert last.action == "反算写回"
     assert "4555.55" in last.summary and "尾差" in last.summary
-    assert last.operator == "测试客服" and last.view == "销售"
+    assert last.operator == "测试客服" and last.view == "销售视图"  # R23①：view 长名统一
     dp = pricing.price_doc(win.doc.lines, win.doc.mode, win.doc.unified_rate, win.p)
     assert dp.quote == D("4555.55")
     assert win.lbl_quote.text() == "4555.55"
