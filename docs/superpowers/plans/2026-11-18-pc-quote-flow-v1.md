@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.11 / PySide6 / openpyxl / pytest + pytest-qt / PyInstaller / uv
 
+**Repo rules:** 仓库根 `AGENTS.md`（必读：红线、质量门禁触发条件 T1–T4、bug 修复 TDD 流程、子代理复核规则）
+
 **Spec:** `docs/superpowers/specs/2026-11-18-pc-quote-flow-design.md`（v5；**附录B 数学计算逻辑规范为唯一计算口径**，执行者必须同时阅读）
 
 ## Global Constraints
@@ -25,7 +27,7 @@
 - 保存原子化：临时文件 + os.replace，上一版留 `.bak`；内容哈希检测程序外改动。
 - UI 文案、README、注释、提交说明用中文；提交信息用 feat/fix/test/chore 前缀；每任务至少一次提交。
 - 测试命令统一：仓库根目录下 `.venv/Scripts/python.exe -m pytest tests/... -v`；GUI 测试 `QT_QPA_PLATFORM=offscreen`（conftest 设置）。
-- **每任务完成门禁（用户要求，规范 §14）**：每个任务的"提交"步骤前必须先跑——① 全量回归 `pytest tests/ -v` 全绿；② `python -m pc_quote_flow --selftest`（Task 8 起）；③ 独立数学交叉核对 `.venv/Scripts/python.exe scripts/verify_math.py` 全 PASS（Task 3 起；脚本不导入程序计算函数，按附录B.7 独立 Decimal 重算比对程序输出）；④ 任何失败先排障修复再重跑全部门禁，全绿才提交，门禁结果记入提交说明（如"门禁: 42 passed, selftest OK, 数学核对 12/12"）。下文各任务不再逐一重复。
+- **每任务完成门禁（用户要求，规范 §14）**：每个任务的"提交"步骤前必须先跑——① 全量回归 `pytest tests/ -v` 全绿；② `python -m pc_quote_flow --selftest`（Task 8 起）；③ 独立数学交叉核对 `.venv/Scripts/python.exe scripts/verify_math.py` 全 PASS（Task 3 起；脚本不导入程序计算函数，按附录B.7 独立 Decimal 重算比对程序输出）；④ 任何失败先排障修复再重跑全部门禁，全绿才提交，门禁结果记入提交说明（如"门禁: 42 passed, selftest OK, 数学核对 12/12"）。**触发不止任务完成：任何 bug 修复后（含测试中发现的）、每次 commit/push 前、打包前同样必须跑**；bug 修复先写复现失败测试再修（TDD）。规则全文见仓库根 **`AGENTS.md`**（仓库级开发规则，所有子代理必读，控制者亲自复核门禁）。下文各任务不再逐一重复。
 
 ## Review Focus
 
@@ -39,6 +41,7 @@
 
 ```
 pc-quote-flow/
+├── AGENTS.md                       # 仓库级开发规则（红线/质量门禁T1–T4/子代理必读）
 ├── pyproject.toml                  # 元数据+依赖+pytest 配置（src 布局，editable 安装）
 ├── src/pc_quote_flow/
 │   ├── __init__.py / __main__.py   # 包入口；python -m pc_quote_flow [--selftest]
@@ -361,7 +364,7 @@ def test_actuals_negative(cfg_b_lines):
 - [ ] **Step 1: 写 spec 与 build.py**：PyInstaller onefile、name="pc-quote-flow"、windowed、入口 `src/pc_quote_flow/__main__.py`、datas 无（样例不打包）、hiddenimports 按 PySide6/openpyxl 需要；build.py 用 venv python 调 `python -m PyInstaller packaging/pc-quote-flow.spec --distpath dist --workpath build -y`
 - [ ] **Step 2: 构建**：`.venv/Scripts/python.exe packaging/build.py`（预计数分钟）→ dist/pc-quote-flow.exe 存在
 - [ ] **Step 3: exe 自检**：`dist/pc-quote-flow.exe --selftest; echo $?` → 退出码 0（Review：若 windowed 无 stdout，以退出码为准）
-- [ ] **Step 4: 仓库卫生检查**：`git grep -nE "7893|6574\.04|6616\.04|2547|2008|1549|1199|8080|6715|2630|2180|1085|1550" -- .` → **零匹配**（真实价格特征值）；`git ls-files | grep -E "^(data|exports)/"` → 空；samples/ 与 tests/ 只含虚构值
+- [ ] **Step 4: 仓库卫生检查**：`git grep -nE "7893|6574\.04|6616\.04|2547|2008|1549|1199|8080|6715|2630|2180|1085|1550" -- src tests samples README.md docs/superpowers/specs` → **零匹配**（真实价格特征值；AGENTS.md/计划文件含清单本身，排除在扫描外）；`git ls-files | grep -E "^(data|exports)/"` → 空；samples/ 与 tests/ 只含虚构值
 - [ ] **Step 4b: 数学验证报告（人工核算依据）**：扩展 `scripts/verify_math.py` 覆盖附录B.7 全部 12 用例，运行生成 `docs/math-verification-report.md`（独立重算 vs 程序输出逐项对照表+结论）入库，供用户/财务人工核算
 - [ ] **Step 5: 写 UAT 清单** `docs/uat-checklist.md`（中文，用户 GUI 验收用）：⓪对照 docs/math-verification-report.md 与规范附录B.7 期望值总表做人工核算（用户/财务）①双击 exe 登记姓名角色 ②打开 samples/虚构配置B.xlsx 核对四数 4543.00/365.49/10.00%/9.09% ③改利润率−5 看红色警告、导出客户报价单弹确认、确认后导出成功 ④用 Excel/WPS 打开导出的客户报价单确认无成本/供应商/链接 ⑤导出审批文件→审阅视图看摘要→填"同意"→状态采购中 ⑥采购视图点链接、填确认价 2000 看"请按公司流程审批"提示、回写实际价 1050 看真实利润 315.49 与侵蚀提示 ⑦查修改日志每步盖章（姓名/角色/机器/Windows账户/视图/版本）⑧保存后 .bak 存在 ⑨反算 4555.55 写回合计精确
 - [ ] **Step 6: README 更新运行方式 + 提交**：`git commit -m "chore: PyInstaller打包、UAT清单与仓库卫生检查"`；`git push origin main`
