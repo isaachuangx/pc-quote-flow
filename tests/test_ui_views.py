@@ -386,3 +386,66 @@ def test_purchase_view_standalone(qtbot, reg_profile, cfg_b_lines):
     assert pv.doc is doc2
     assert pv.model.doc is doc2
     assert pv.model.rowCount() == 9
+
+
+# ---- Fix Round 1（Important-1）：确认后底价去 confirmed 标志门禁 ----------------
+# 根因：confirmed 列不在任何视图可编辑白名单（默认 False，仅文件往返可 True），
+# 旧实现以 flag 门禁确认价 → 纯 GUI 录入的确认价永不进入确认后底价，
+# 与 pricing._effective 确认阶段口径（None 合并回退）及 actuals 面板自相矛盾。
+
+
+def test_confirmed_floor_gui_without_flag(qtbot, reg_profile, cfg_b_lines, msgbox):
+    """纯 GUI 工作流：confirmed 保持默认 False，仅录入确认价/确认票种 →
+    确认后底价用确认价 5260.00、红警告触发、导出仍 enabled（Important-1 回归）。"""
+    doc = make_doc(cfg_b_lines)
+    cpu = doc.lines[0]
+    assert cpu.confirmed is False  # model 默认值；「价格已确认」列不可编辑，不得靠置位绕过
+    cpu.confirm_price = D("2000")
+    cpu.confirm_invoice = "普票"
+    win = MainWindow(doc=doc)
+    qtbot.addWidget(win)
+    win.show()
+    win.tabs.setCurrentIndex(1)  # 采购 tab 须为当前页，isVisible 才沿父链成立
+    pv = win.purchase_view
+    h = hdr(pv.model)
+    # 修复不得偏离简报可编辑列清单：「价格已确认」仍仅显示
+    assert not (pv.model.flags(pv.model.index(0, h["价格已确认"])) & Qt.ItemIsEditable)
+    assert pv.lbl_floor_confirmed.text() == "5260.00"  # 2000×1.13 + 3000 = 5260.00
+    # 与同屏 actuals 面板一致（未录实际价时 _effective 确认阶段同口径）
+    assert pv.lbl_floor_effective.text() == "5260.00"
+    assert pv.lbl_warning.isVisible()
+    assert "已低于底价，请按公司流程审批" in pv.lbl_warning.text()
+    # 红线2：警告不 disable 任何导出
+    assert win.btn_export_customer.isEnabled()
+    assert win.btn_export_approval.isEnabled()
+    assert win.btn_export_purchase.isEnabled()
+
+
+def test_confirmed_floor_none_fallback(qtbot, reg_profile, cfg_b_lines, msgbox):
+    """对照：未录确认价（confirm_price=None）→ 确认后底价回退成本口径 4130.00，无警告。"""
+    doc = make_doc(cfg_b_lines)
+    cpu = doc.lines[0]
+    assert cpu.confirm_price is None and cpu.confirmed is False
+    win = MainWindow(doc=doc)
+    qtbot.addWidget(win)
+    win.show()
+    win.tabs.setCurrentIndex(1)
+    pv = win.purchase_view
+    assert pv.lbl_floor_confirmed.text() == "4130.00"  # 成本口径 B（附录B.6 例3）
+    assert not pv.lbl_warning.isVisible()
+    assert win.btn_export_customer.isEnabled()
+
+
+def test_confirmed_floor_invoice_only_fallback(qtbot, reg_profile, cfg_b_lines, msgbox):
+    """仅录确认票种（未录确认价）→ 票种独立回退到确认层：CPU 1000 专票 → 4000.00。"""
+    doc = make_doc(cfg_b_lines)
+    cpu = doc.lines[0]
+    assert cpu.confirm_price is None and cpu.confirmed is False
+    cpu.confirm_invoice = "专票"
+    win = MainWindow(doc=doc)
+    qtbot.addWidget(win)
+    win.show()
+    win.tabs.setCurrentIndex(1)
+    pv = win.purchase_view
+    assert pv.lbl_floor_confirmed.text() == "4000.00"  # 1000×1 + 3000 = 4000.00
+    assert not pv.lbl_warning.isVisible()  # 4000.00 < 报价 4543.00

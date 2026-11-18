@@ -3,8 +3,9 @@
 
 数学一律消费 pricing.price_doc/actuals 与 tax.floor_contrib（附录B 唯一权威，不新造公式）：
 - 报价时底价 B = dp.floor（锁定报价时口径）；
-- 确认后底价（brief 口径）：confirmed 且 confirm_price 非 None → 确认价，否则成本价；
-  发票同条件独立回退（confirm_invoice → invoice），Σ floor_contrib 全精度求和后 fen() 到分；
+- 确认后底价（brief 口径）：confirm_price 非 None → 确认价，否则成本价（不看 confirmed 标志，
+  与 pricing._effective 确认阶段对齐）；发票同条件独立回退（confirm_invoice → invoice），
+  Σ floor_contrib 全精度求和后 fen() 到分；
 - 真实利润走 pricing.actuals（实际→确认→成本回退链），eroded/negative 仅提示。
 低于底价仅红字警告，绝不 disable 任何操作（红线2 无权限门禁）；审批状态只读展示。
 商品链接列只读，双击经 QDesktopServices.openUrl 打开（不走编辑）。
@@ -125,12 +126,15 @@ class PurchaseView(QWidget):
         self._refresh_actuals()
 
     def _confirmed_floor(self) -> Decimal:
-        """确认后底价（brief/控制者口径）：确认价优先（confirmed 且非 None），否则成本价；
-        发票独立同条件回退。全精度 Σ floor_contrib 后一次 fen()（附录B.1 先算后舍）。"""
+        """确认后底价（brief/控制者口径）：确认价优先（非 None），否则成本价；
+        发票独立同条件回退（confirm_invoice 非 None → 确认票种，否则 invoice）。
+        不看 confirmed 标志：该列不在任何视图可编辑白名单（默认 False，仅文件往返可 True），
+        以 flag 门禁会使纯 GUI 录入的确认价永不生效（Important-1）；
+        与 pricing._effective 确认阶段口径对齐。全精度 Σ floor_contrib 后一次 fen()（附录B.1 先算后舍）。"""
         total = Decimal("0")
         for ln in self.doc.lines:
-            price = ln.confirm_price if (ln.confirmed and ln.confirm_price is not None) else ln.unit_price
-            invoice = ln.confirm_invoice if (ln.confirmed and ln.confirm_invoice is not None) else ln.invoice
+            price = ln.confirm_price if ln.confirm_price is not None else ln.unit_price
+            invoice = ln.confirm_invoice if ln.confirm_invoice is not None else ln.invoice
             total += tax.floor_contrib(price, ln.qty, invoice, self.p)
         return fen(total)
 
