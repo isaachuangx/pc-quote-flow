@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 实现设计文档 v4 定义的装机报价流转工具 v1：增值税底价/利润率报价计算、三种隔离导出、管理层审阅、操作人留痕、采购回写，打包 Windows 单文件 exe。
+**Goal:** 实现设计文档 v5 定义的装机报价流转工具 v1：增值税底价/利润率报价计算、三种隔离导出、管理层审阅、操作人留痕、采购回写，打包 Windows 单文件 exe。
 
 **Architecture:** 纯 Python 分层：计算核心（money/tax/pricing，Decimal 精确）→ 数据模型与状态（model/states）→ xlsx 持久化（store，原子保存+哈希+只增日志）→ 身份（identity）→ 导出与审阅（exports/review）→ PySide6 界面（ui/，三视图纯 UI 切换无权限）。数据载体为程序自有格式 xlsx，打开即重算派生列。
 
@@ -317,7 +317,7 @@ def test_actuals_negative(cfg_b_lines):
 - Consumes: 全部核心模块
 - Produces:
   - `python -m pc_quote_flow [--selftest] [file.xlsx]`；`ui.app.main(argv: list[str]|None=None) -> int`
-  - `--selftest`：无 GUI 跑附录A/B pricing 断言 + temp 目录 store 往返，成功 print("SELFTEST OK") 返回 0，失败返回 1
+  - `--selftest`：无 GUI 跑附录A/B pricing 断言 + temp 目录 store 往返，成功 print("SELFTEST OK") 返回 0，失败返回 1。**两种输出模式（Task 10 exe 验证依赖）**：源码模式打印 stdout+退出码；windowed exe 模式无 stdout，以退出码表达结果（0=通过），并把同样的自检输出写日志到 `%TEMP%/pc-quote-flow-selftest.log`
   - `ui.app.MainWindow(path: Path|None=None)`：工具栏（当前操作人标签+切换按钮、打开/保存、视图切换 tabs 销售|采购|审阅、三导出按钮）；四数面板（QLabel：底价/客户报价/利润(不含税)/加成率/毛利率，objectName 依次 lbl_floor/lbl_quote/lbl_profit/lbl_markup/lbl_margin）；利润率输入 txt_rate + 模式 combo_mode（"成本加成"|"销售毛利率"）；明细 QTableView（QuoteTableModel）；警告标签 lbl_warning（低于底价红色可见）
   - `ui.table_model.QuoteTableModel(doc, view: str, p)`：QAbstractTableModel；列按视图过滤（销售视图可隐藏供应商/链接，checkbox 控制）；派生列只读；销售视图可编辑：部件名/型号/数量/含税成本单价/发票类型/供应商/平台/商品链接/单项利润率；setData 后触发重算与刷新信号
   - `ui.dialogs.RegisterDialog`（首次运行 load_profile() is None 时弹出：姓名预填 windows_account()、角色 combo 默认"销售客服"）→ save_profile
