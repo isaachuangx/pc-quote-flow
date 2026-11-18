@@ -311,7 +311,7 @@ def test_actuals_negative(cfg_b_lines):
 
 **Files:**
 - Create: `src/pc_quote_flow/__main__.py`, `src/pc_quote_flow/ui/__init__.py`, `src/pc_quote_flow/ui/app.py`, `src/pc_quote_flow/ui/table_model.py`, `src/pc_quote_flow/ui/sales_view.py`, `src/pc_quote_flow/ui/dialogs.py`, `tests/test_ui.py`
-- Modify: `tests/conftest.py`（追加 `os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")`）
+- Modify: `tests/conftest.py`（**QT_QPA_PLATFORM=offscreen 已于 :11 设置，无需重复追加**；现有夹具 cfg_a_lines/cfg_b_lines 复用，如需 UI 专用夹具在此追加）
 
 **Interfaces:**
 - Consumes: 全部核心模块
@@ -320,16 +320,17 @@ def test_actuals_negative(cfg_b_lines):
   - `--selftest`：无 GUI 跑附录A/B pricing 断言 + temp 目录 store 往返，成功 print("SELFTEST OK") 返回 0，失败返回 1。**两种输出模式（Task 10 exe 验证依赖）**：源码模式打印 stdout+退出码；windowed exe 模式无 stdout，以退出码表达结果（0=通过），并把同样的自检输出写日志到 `%TEMP%/pc-quote-flow-selftest.log`
   - `ui.app.MainWindow(path: Path|None=None)`：工具栏（当前操作人标签+切换按钮、打开/保存、视图切换 tabs 销售|采购|审阅、三导出按钮）；四数面板（QLabel：底价/客户报价/利润(不含税)/加成率/毛利率，objectName 依次 lbl_floor/lbl_quote/lbl_profit/lbl_markup/lbl_margin）；利润率输入 txt_rate + 模式 combo_mode（"成本加成"|"销售毛利率"）；明细 QTableView（QuoteTableModel）；警告标签 lbl_warning（低于底价红色可见）
   - `ui.table_model.QuoteTableModel(doc, view: str, p)`：QAbstractTableModel；列按视图过滤（销售视图可隐藏供应商/链接，checkbox 控制）；派生列只读；销售视图可编辑：部件名/型号/数量/含税成本单价/发票类型/供应商/平台/商品链接/单项利润率；setData 后触发重算与刷新信号
-  - `ui.dialogs.RegisterDialog`（首次运行 load_profile() is None 时弹出：姓名预填 windows_account()、角色 combo 默认"销售客服"）→ save_profile
+  - `ui.dialogs.RegisterDialog`（首次运行 load_profile() is None 时弹出：姓名预填 windows_account() 可编辑、角色 combo 默认"销售客服"；**Profile 四字段齐全** name/role/machine/win_account——machine=machine_name()、win_account=windows_account() 作只读 OS 锚点显示并写入 Profile，R17①）→ save_profile(Profile(name,role,machine,win_account))；load_profile 在 APPDATA 缺失时抛 KeyError（profile_dir 用 os.environ["APPDATA"]，不被其 OSError/ValueError 捕获），UI 须防御捕获 KeyError 视为首次运行（R17②）
   - `ui.dialogs.ReverseDialog(doc, p)`：输入目标价→显示反算加成率/毛利率/利润→「写回」按钮调 apply_reverse+刷新+日志
   - `ui.dialogs.SettingsDialog`：操作人姓名/角色、默认算法、有效期天数（税率 v1 固定 13% 只读显示）
-  - 导出按钮 wiring：NeedsConfirmation → QMessageBox.question 一次确认 → confirmed=True 重试；低于底价时 lbl_warning 红色常显但**导出按钮永不 disable**
+  - 导出按钮 wiring：NeedsConfirmation → QMessageBox.question 一次确认 → confirmed=True 重试；**捕获 wb.save 的 OSError → QMessageBox.critical 提示"导出失败"不崩溃（R21①/T6-M1）；捕获 ValueError 与 decimal.DivisionByZero（空明细/非法日期）→ 中文提示（R19①②，DivisionByZero 不是 ValueError 须分别捕获）；导出成功后由调用方 store.save(doc, 工作文件路径) 递增 version（R20⑧ 调用方职责，exports 自身不 save）**；低于底价时 lbl_warning 红色常显但**导出按钮永不 disable**
+  - **打开文件留痕（R15，design:337/:397/:417）**：MainWindow 打开/加载走 store.load(path)→(doc,warnings)；warnings 非空时 QMessageBox.warning 提示"文件曾在程序外被修改"，并经 identity.make_stamp(profile, view=当前视图, action="打开文件", summary="；".join(warnings), version=doc.version) **append 一条日志盖章**（当前操作人姓名+角色+机器+Windows账户+视图+时间+版本），随后 refresh_pricing；warnings 为空则不额外记日志
   - 采购/审阅 tab 本任务放占位 QWidget（Task 9 替换）
 
-- [ ] **Step 1: 写失败测试** `tests/test_ui.py`（pytest-qt qtbot；monkeypatch APPDATA→tmp_path）：test_first_run_registration（MainWindow 构造→RegisterDialog 出现，填"测试客服"/销售客服→profile.json 生成）；test_four_numbers_update（打开 samples/虚构配置B.xlsx，txt_rate 设"10"模式成本加成→lbl_quote=="4543.00"、lbl_profit=="365.49"、lbl_markup=="10.00%"、lbl_margin=="9.09%"）；test_below_floor_warning_not_block（rate −5→lbl_warning 可见且红色样式、导出按钮 isEnabled）；test_reverse_writeback（ReverseDialog 目标 4555.55 写回→doc 整机报价 4555.55）；test_selftest_flag（subprocess 跑 `.venv/Scripts/python.exe -m pc_quote_flow --selftest`→returncode 0 且 stdout 含"SELFTEST OK"）
+- [ ] **Step 1: 写失败测试** `tests/test_ui.py`（pytest-qt qtbot；monkeypatch APPDATA→tmp_path）：test_first_run_registration（MainWindow 构造→RegisterDialog 出现，填"测试客服"/销售客服→profile.json 生成）；test_four_numbers_update（打开 samples/虚构配置B.xlsx，txt_rate 设"10"模式成本加成→lbl_quote=="4543.00"、lbl_profit=="365.49"、lbl_markup=="10.00%"、lbl_margin=="9.09%"）；test_below_floor_warning_not_block（rate −5→lbl_warning 可见且红色样式、导出按钮 isEnabled）；test_reverse_writeback（ReverseDialog 目标 4555.55 写回→doc 整机报价 4555.55）；test_selftest_flag（subprocess 跑 `.venv/Scripts/python.exe -m pc_quote_flow --selftest`→returncode 0 且 stdout 含"SELFTEST OK"）；test_open_external_change_logs（store.save 生成文件后手改某单元格制造哈希不一致→MainWindow 打开→warnings 非空、doc.logs 末条 action=="打开文件"且 summary 含"程序外被修改"、operator==Profile.name、view 盖章，R15）；test_export_oserror_and_caller_save（monkeypatch openpyxl Workbook.save 抛 OSError→点导出 UI 捕获提示不崩溃；恢复后导出客户报价单→调用方 store.save 使工作文件 version 递增，R21①）
 - [ ] **Step 2: 运行确认失败** → FAIL
 - [ ] **Step 3: 实现 ui 各文件与 __main__.py**（PySide6；中文文案；四数刷新统一走 refresh_pricing() 调 price_doc；所有写操作经 make_stamp 记日志）
-- [ ] **Step 4: 运行确认通过** → PASS（5 项）；再跑全量 `.venv/Scripts/python.exe -m pytest tests/ -v` 全绿
+- [ ] **Step 4: 运行确认通过** → PASS（7 项）；再跑全量 `.venv/Scripts/python.exe -m pytest tests/ -v` 全绿
 - [ ] **Step 5: 提交**：`git commit -m "feat: 主窗口/销售视图/登记/反算/设置对话框与selftest"`
 
 ### Task 9: 采购视图 + 审阅视图
