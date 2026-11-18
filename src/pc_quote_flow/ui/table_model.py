@@ -99,7 +99,11 @@ class QuoteTableModel(QAbstractTableModel):
         return str(section + 1)
 
     def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid() or role != Qt.DisplayRole:
+        # EditRole 与 DisplayRole 同值（R23④）：QStyledItemDelegate.setEditorData
+        # 取 EditRole 预填编辑器，返回 None 会弹空编辑器（空串回车可清空部件名键列）。
+        # 各列解析口径自洽：pct? 显示 pct2/编辑 ÷100、bool 显示是否/编辑 ==是、
+        # invoice 双向归一化、int/dec str 往返；derived 由 flags 挡编辑不可达。
+        if not index.isValid() or role not in (Qt.DisplayRole, Qt.EditRole):
             return None
         ln = self.doc.lines[index.row()]
         _, field, kind = self.cols[index.column()]
@@ -136,6 +140,13 @@ class QuoteTableModel(QAbstractTableModel):
             new = self._parse(kind, value)
         except (ValueError, InvalidOperation):
             return False  # 非法输入：拒绝写入，不改字段、不记日志
+        # 数据卫生（R23②，非权限门禁）：越界值与键列空串拒绝，不改字段、不记日志
+        if field == "qty" and isinstance(new, int) and new < 1:
+            return False  # 数量至少 1（0 使件底价/件报价恒 0，无业务意义）
+        if field == "unit_price" and isinstance(new, Decimal) and new < 0:
+            return False  # 含税成本单价不得为负
+        if field == "name" and not str(new).strip():
+            return False  # 部件名是 store 键列，空串会使工作文件不可打开（R23④纵深）
         old = getattr(ln, field)
         if new == old:
             return False
@@ -149,7 +160,10 @@ class QuoteTableModel(QAbstractTableModel):
 
     @staticmethod
     def _parse(kind: str, value):
-        """按列类型解析编辑值；百分比输入按 % 数（输 12 → 0.12，与 txt_rate 同口径）。"""
+        """按列类型解析编辑值；百分比输入按 % 数（输 12 → 0.12，与 txt_rate 同口径）。
+
+        非有限 Decimal（NaN/Infinity/sNaN）一律按非法输入拒绝（R23②）。
+        """
         s = str(value).strip()
         if kind == "str":
             return s
@@ -161,11 +175,17 @@ class QuoteTableModel(QAbstractTableModel):
         if kind in ("dec", "dec?"):
             if kind == "dec?" and s == "":
                 return None
-            return Decimal(s)
+            d = Decimal(s)
+            if not d.is_finite():
+                raise ValueError("数值必须是有限值（NaN/Infinity 非法）")
+            return d
         if kind == "pct?":
             if s == "":
                 return None
-            return Decimal(s) / 100
+            d = Decimal(s)
+            if not d.is_finite():
+                raise ValueError("数值必须是有限值（NaN/Infinity 非法）")
+            return d / 100
         if kind in ("invoice", "invoice?"):
             if kind == "invoice?" and s == "":
                 return None

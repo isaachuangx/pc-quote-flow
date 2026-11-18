@@ -284,6 +284,15 @@ class MainWindow(QMainWindow):
                 self.sales_view.model.refresh()
                 self._update_title()
                 return
+            # NaN 传播不抛异常（fen(NaN)=NaN），但 set_pricing 的 q<f 比较会抛
+            # InvalidOperation：守卫扩到 set_pricing 之前，非有限结果走计算错误通道（R23②）
+            if not (dp.quote.is_finite() and dp.floor.is_finite()
+                    and dp.profit_excl.is_finite() and dp.markup.is_finite()
+                    and dp.margin.is_finite()):
+                self.sales_view.show_calc_error("存在非有限数值（NaN/Infinity），请检查利润率/发票类型")
+                self.sales_view.model.refresh()
+                self._update_title()
+                return
         self.sales_view.set_pricing(dp)
         self.sales_view.model.refresh()
         self._update_title()
@@ -306,7 +315,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "利润率", f"请输入百分比数字（如 10 表示 10%），当前输入：{text!r}")
             self._sync_rate_controls()
             return
+        if not pct.is_finite():
+            QMessageBox.warning(self, "利润率", "利润率必须是有限数值（NaN/Infinity 非法）")
+            self._sync_rate_controls()
+            return
         rate = pct / 100  # 百分比输入口径（R22③：输 10 → 0.10）
+        if pct == pct2(self.doc.unified_rate):
+            # 判等用显示口径（R23③）：editingFinished 亦由焦点离开发送（文本未改），
+            # 若以全精度判等，反算写回的全精度率会被显示舍入值静默覆盖（违红线3）；
+            # 显示回读不写 doc、不记日志，内部全精度值永不因显示回读降精度
+            return
         if self.doc.mode == "margin" and rate >= 1:
             QMessageBox.warning(self, "利润率", "毛利率模式的利润率必须小于 100%")
             self._sync_rate_controls()
@@ -400,15 +418,19 @@ class MainWindow(QMainWindow):
             if not path:
                 return False
             self.path = Path(path)
-        stamp = identity.make_stamp(
-            self.profile, view=self.current_view(), action="保存",
-            summary=f"保存工作文件（{_MODE_CN[self.doc.mode]}，统一利润率 {pct2(self.doc.unified_rate)}%）",
-            version=self.doc.version,
-        )
         try:
+            # stamp 的 pct2 计算亦可能抛 InvalidOperation（污染数据），一并纳入守卫（R23②）
+            stamp = identity.make_stamp(
+                self.profile, view=self.current_view(), action="保存",
+                summary=f"保存工作文件（{_MODE_CN[self.doc.mode]}，统一利润率 {pct2(self.doc.unified_rate)}%）",
+                version=self.doc.version,
+            )
             store.save(self.doc, self.path, stamp)
         except OSError as e:
             QMessageBox.critical(self, "保存失败", f"保存失败：{e}（文件被占用或磁盘不可写）")
+            return False
+        except ArithmeticError as e:  # InvalidOperation 是其子类（R23②）
+            QMessageBox.critical(self, "保存失败", f"计算错误，无法保存（请检查利润率/发票类型）：{e}")
             return False
         self.refresh_pricing()
         return True
@@ -461,7 +483,9 @@ class MainWindow(QMainWindow):
         quote_txt = "0.00"
         if self.doc.lines:
             try:
-                quote_txt = str(pricing.price_doc(self.doc.lines, self.doc.mode, self.doc.unified_rate, self.p).quote)
+                dp = pricing.price_doc(self.doc.lines, self.doc.mode, self.doc.unified_rate, self.p)
+                # NaN 不抛异常但不得进入日志摘要（R23②数据卫生）
+                quote_txt = str(dp.quote) if dp.quote.is_finite() else "计算错误"
             except (ValueError, ArithmeticError):
                 quote_txt = "计算错误"
         stamp = identity.make_stamp(
@@ -491,6 +515,9 @@ class MainWindow(QMainWindow):
             return
         except DivisionByZero:  # 非 ValueError 子类，须分别捕获（R22⑥）
             QMessageBox.warning(self, "无法导出", "计算除零：请检查明细单价/数量与利润率")
+            return
+        except ArithmeticError as e:  # InvalidOperation（NaN 比较）等，非上述子类（R23②）
+            QMessageBox.warning(self, "无法导出", f"计算错误（请检查利润率/发票类型）：{e}")
             return
         # 导出成功 → 调用方保存工作文件，version+1（R20⑧/R22⑥）
         save_stamp = identity.make_stamp(

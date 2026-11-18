@@ -114,10 +114,14 @@ class ReverseDialog(QDialog):
 
     def _target(self) -> Decimal | None:
         try:
-            return Decimal(self.txt_target.text().strip())
+            target = Decimal(self.txt_target.text().strip())
         except InvalidOperation:
             QMessageBox.warning(self, "反算", "请输入数字目标价，如 4555.55")
             return None
+        if not target.is_finite():
+            QMessageBox.warning(self, "反算", "目标价必须是有限数值（NaN/Infinity 非法）")
+            return None
+        return target
 
     def _preview(self) -> None:
         t = self._target()
