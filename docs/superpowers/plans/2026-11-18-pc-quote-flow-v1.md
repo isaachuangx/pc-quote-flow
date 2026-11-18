@@ -8,13 +8,13 @@
 
 **Tech Stack:** Python 3.11 / PySide6 / openpyxl / pytest + pytest-qt / PyInstaller / uv
 
-**Spec:** `docs/superpowers/specs/2026-11-18-pc-quote-flow-design.md`（v4，执行者必须同时阅读）
+**Spec:** `docs/superpowers/specs/2026-11-18-pc-quote-flow-design.md`（v5；**附录B 数学计算逻辑规范为唯一计算口径**，执行者必须同时阅读）
 
 ## Global Constraints
 
 - Python 3.11（本机 `C:/Users/admin/AppData/Local/Programs/Python/Python311/python.exe`）；venv 用 uv 创建；依赖走清华镜像 `https://pypi.tuna.tsinghua.edu.cn/simple`。
 - 依赖：openpyxl>=3.1、PySide6>=6.8；dev：pytest>=8、pytest-qt>=4.4、pyinstaller>=6。
-- 金额一律 `Decimal`，`ROUND_HALF_UP` 舍入到分（0.01）；中间量全精度；**整机报价 = 舍入后件报价之和**；底价显示到分。
+- 金额一律 `Decimal`，`ROUND_HALF_UP` 舍入到分（0.01）；中间量全精度；**整机报价 = 舍入后件报价之和**；底价显示到分；件报价由**全精度**件底价计算（非显示舍入值）。**规范附录B（数学计算逻辑规范）为唯一数学口径**，含期望值总表 B.7。
 - 税务（一般纳税人 13%）：专票（含京东专票，输入时归一化为"专票"）件底价贡献 = 含税单价×数量；普票 = 含税单价×数量×1.13；B = S + P×1.13；C = S/1.13 + P；底价应缴增值税 = P×0.13。
 - 加成模式 Q = B×(1+r)；毛利率模式 Q = B÷(1−m)；加成率 = (Q−B)/B；毛利率 = (Q−B)/Q；利润额(不含税) = (Q−B)/1.13。百分比显示保留 2 位小数。
 - 含税成本列 = 单价；一切按 单价×数量 行总价计算。
@@ -25,10 +25,11 @@
 - 保存原子化：临时文件 + os.replace，上一版留 `.bak`；内容哈希检测程序外改动。
 - UI 文案、README、注释、提交说明用中文；提交信息用 feat/fix/test/chore 前缀；每任务至少一次提交。
 - 测试命令统一：仓库根目录下 `.venv/Scripts/python.exe -m pytest tests/... -v`；GUI 测试 `QT_QPA_PLATFORM=offscreen`（conftest 设置）。
+- **每任务完成门禁（用户要求，规范 §14）**：每个任务的"提交"步骤前必须先跑——① 全量回归 `pytest tests/ -v` 全绿；② `python -m pc_quote_flow --selftest`（Task 8 起）；③ 独立数学交叉核对 `.venv/Scripts/python.exe scripts/verify_math.py` 全 PASS（Task 3 起；脚本不导入程序计算函数，按附录B.7 独立 Decimal 重算比对程序输出）；④ 任何失败先排障修复再重跑全部门禁，全绿才提交，门禁结果记入提交说明（如"门禁: 42 passed, selftest OK, 数学核对 12/12"）。下文各任务不再逐一重复。
 
 ## Review Focus
 
-1. 普票行 数量>1 且单价带小数（99.99×3）→ 底价/报价按行总价算、舍入不漂移（Task 3 测试钉死：floor 338.97 / quote 372.87）。
+1. 普票行 数量>1 且单价带小数（99.99×3）→ 底价/报价按行总价算、舍入不漂移（Task 3 测试钉死：floor 338.97 / quote **372.86**——件报价用全精度底价 338.9661 计算，不是显示值 338.97，见规范附录B.6 例7）。
 2. 文件被 Excel 手改（改成本/删列/删表）后打开 → 派生列重算+外部改动警告留痕；缺表缺列友好报错不崩溃不丢数据（Task 4）。
 3. 低于底价导出客户报价单 → 警告+一次确认+日志但可导出；导出文件任何角落（隐藏列/批注/属性）无内部字段（Task 6）。
 4. 同一文件先后被两人保存（旧覆新）→ 版本号递增、日志可查、`.bak` 可恢复（Task 4）。
@@ -52,6 +53,7 @@ pc-quote-flow/
 │   ├── review.py                   # 审批摘要、审批结论写回
 │   └── ui/                         # app.py 主窗口/selftest；sales_view/purchase_view/review_view；dialogs.py；table_model.py
 ├── tests/                          # conftest.py（虚构夹具）+ 每模块一个测试文件 + test_ui.py
+├── scripts/verify_math.py          # 独立数学交叉核对（不导入程序计算函数，重算规范附录B.7 比对程序输出，可生成验证报告）
 ├── samples/                        # make_samples.py + 虚构配置A/B.xlsx + README（虚构声明）
 ├── packaging/                      # pc-quote-flow.spec + build.py
 └── docs/                           # superpowers/specs|plans + uat-checklist.md
@@ -180,7 +182,7 @@ def test_item_override(cfg_b_lines):
 def test_rounding_99_99_qty3():
     ln = model.QuoteLine(name="测试件", qty=3, unit_price=D("99.99"), invoice="普票")
     dp = pricing.price_doc([ln], "markup", D("0.10"), tax.TaxProfile())
-    assert dp.line_floors == [D("338.97")] and dp.line_quotes == [D("372.87")]  # Review Focus 1
+    assert dp.line_floors == [D("338.97")] and dp.line_quotes == [D("372.86")]  # Review Focus 1：全精度 338.9661×1.1=372.86271→372.86
 
 def test_apply_reverse_absorbs_drift(cfg_b_lines):
     doc = model.QuoteDoc(config_name="B", lines=lines(cfg_b_lines), mode="markup", unified_rate=D("0.10"))
@@ -207,9 +209,9 @@ def test_actuals_negative(cfg_b_lines):
 （省略号处按注释断言写全；reverse_rate 另测：markup reverse_rate(4543,4130)==D(370)/D(4130) 全精度相等。）
 
 - [ ] **Step 2: 运行确认失败** → FAIL
-- [ ] **Step 3: 实现 pricing.py**（公式见 Global Constraints 与 Interfaces；apply_reverse 的尾差吸收规则：drift 加到底价最大件，其余 quote_adjust=0）
+- [ ] **Step 3: 实现 pricing.py**（公式见 Global Constraints 与 Interfaces；apply_reverse 的尾差吸收规则：drift 加到底价最大件，其余 quote_adjust=0）；同时创建 `scripts/verify_math.py` 初版：**不导入 pc_quote_flow.pricing/tax**，用 Decimal 按规范附录B.7 独立重算并调用程序输出逐项比对（本任务覆盖底价/四数/单项覆盖/反算写回/实际利润/数量舍入用例），打印逐项 PASS/FAIL 与汇总，失败退出码 1
 - [ ] **Step 4: 运行确认通过** → PASS（9 项）
-- [ ] **Step 5: 提交**：`git commit -m "feat: 报价计算——四数/单项/反算写回/实际利润重算"`
+- [ ] **Step 5: 门禁+提交**：全量 pytest 与 `scripts/verify_math.py` 全绿后 `git commit -m "feat: 报价计算——四数/单项/反算写回/实际利润重算（门禁: N passed, 数学核对 M/M）"`
 
 ### Task 4: store xlsx 持久化 + 虚构样例文件
 
@@ -360,9 +362,10 @@ def test_actuals_negative(cfg_b_lines):
 - [ ] **Step 2: 构建**：`.venv/Scripts/python.exe packaging/build.py`（预计数分钟）→ dist/pc-quote-flow.exe 存在
 - [ ] **Step 3: exe 自检**：`dist/pc-quote-flow.exe --selftest; echo $?` → 退出码 0（Review：若 windowed 无 stdout，以退出码为准）
 - [ ] **Step 4: 仓库卫生检查**：`git grep -nE "7893|6574\.04|6616\.04|2547|2008|1549|1199|8080|6715|2630|2180|1085|1550" -- .` → **零匹配**（真实价格特征值）；`git ls-files | grep -E "^(data|exports)/"` → 空；samples/ 与 tests/ 只含虚构值
-- [ ] **Step 5: 写 UAT 清单** `docs/uat-checklist.md`（中文，用户 GUI 验收用）：①双击 exe 登记姓名角色 ②打开 samples/虚构配置B.xlsx 核对四数 4543.00/365.49/10.00%/9.09% ③改利润率−5 看红色警告、导出客户报价单弹确认、确认后导出成功 ④用 Excel/WPS 打开导出的客户报价单确认无成本/供应商/链接 ⑤导出审批文件→审阅视图看摘要→填"同意"→状态采购中 ⑥采购视图点链接、填确认价 2000 看"请按公司流程审批"提示、回写实际价 1050 看真实利润 315.49 与侵蚀提示 ⑦查修改日志每步盖章（姓名/角色/机器/Windows账户/视图/版本）⑧保存后 .bak 存在 ⑨反算 4555.55 写回合计精确
+- [ ] **Step 4b: 数学验证报告（人工核算依据）**：扩展 `scripts/verify_math.py` 覆盖附录B.7 全部 12 用例，运行生成 `docs/math-verification-report.md`（独立重算 vs 程序输出逐项对照表+结论）入库，供用户/财务人工核算
+- [ ] **Step 5: 写 UAT 清单** `docs/uat-checklist.md`（中文，用户 GUI 验收用）：⓪对照 docs/math-verification-report.md 与规范附录B.7 期望值总表做人工核算（用户/财务）①双击 exe 登记姓名角色 ②打开 samples/虚构配置B.xlsx 核对四数 4543.00/365.49/10.00%/9.09% ③改利润率−5 看红色警告、导出客户报价单弹确认、确认后导出成功 ④用 Excel/WPS 打开导出的客户报价单确认无成本/供应商/链接 ⑤导出审批文件→审阅视图看摘要→填"同意"→状态采购中 ⑥采购视图点链接、填确认价 2000 看"请按公司流程审批"提示、回写实际价 1050 看真实利润 315.49 与侵蚀提示 ⑦查修改日志每步盖章（姓名/角色/机器/Windows账户/视图/版本）⑧保存后 .bak 存在 ⑨反算 4555.55 写回合计精确
 - [ ] **Step 6: README 更新运行方式 + 提交**：`git commit -m "chore: PyInstaller打包、UAT清单与仓库卫生检查"`；`git push origin main`
-- [ ] **Step 7: 用户 UAT**：agent 备好 exe 与样例路径，用户按清单真人验收（GUI 部分）；通过后打 tag `v0.1.0` 并 push tag
+- [ ] **Step 7: 用户 UAT + 人工数学核算**：agent 备好 exe、样例路径与数学验证报告，用户按清单真人验收（GUI 部分）并按附录B.7 人工核算；**两者都通过**后打 tag `v0.1.0` 并 push tag
 
 ---
 
