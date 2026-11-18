@@ -209,7 +209,7 @@ def test_actuals_negative(cfg_b_lines):
     ...
 ```
 
-（省略号处按注释断言写全；reverse_rate 另测：markup reverse_rate(4543,4130)==D(370)/D(4130) 全精度相等。）
+（省略号处按注释断言写全；reverse_rate 另测：markup reverse_rate(4543,4130)==D(413)/D(4130) 全精度相等。）
 
 - [ ] **Step 2: 运行确认失败** → FAIL
 - [ ] **Step 3: 实现 pricing.py**（公式见 Global Constraints 与 Interfaces；apply_reverse 的尾差吸收规则：drift 加到底价最大件，其余 quote_adjust=0）；同时创建 `scripts/verify_math.py` 初版：**不导入 pc_quote_flow.pricing/tax**，用 Decimal 按规范附录B.7 独立重算并调用程序输出逐项比对（本任务覆盖底价/四数/单项覆盖/反算写回/实际利润/数量舍入用例），打印逐项 PASS/FAIL 与汇总，失败退出码 1
