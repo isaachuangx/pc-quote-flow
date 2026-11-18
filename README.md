@@ -25,7 +25,7 @@
 
 ## 技术栈
 
-Python 3.12+ / PySide6 / openpyxl / Decimal 精确计算 / PyInstaller 打包单文件 exe（Windows 10/11 双击即用）。
+Python 3.11+ / PySide6 / openpyxl / Decimal 精确计算 / PyInstaller 打包单文件 exe（Windows 10/11 双击即用）。
 
 ## 数据卫生（重要）
 
@@ -37,9 +37,41 @@ Python 3.12+ / PySide6 / openpyxl / Decimal 精确计算 / PyInstaller 打包单
 
 ## 文档
 
-- 设计文档：[docs/superpowers/specs/2026-11-18-pc-quote-flow-design.md](docs/superpowers/specs/2026-11-18-pc-quote-flow-design.md)
-- 实现计划：`docs/superpowers/plans/`（实现阶段生成）
+- 设计文档（v5，数学口径见附录B）：[docs/superpowers/specs/2026-11-18-pc-quote-flow-design.md](docs/superpowers/specs/2026-11-18-pc-quote-flow-design.md)
+- 实现计划：[docs/superpowers/plans/2026-11-18-pc-quote-flow-v1.md](docs/superpowers/plans/2026-11-18-pc-quote-flow-v1.md)
+- 数学验证报告（独立重算对照，供人工核算）：[docs/math-verification-report.md](docs/math-verification-report.md)
+- GUI 用户验收清单：[docs/uat-checklist.md](docs/uat-checklist.md)
+
+## 运行方式
+
+### 方式一：单文件 exe（推荐，双击即用）
+
+1. 构建（仓库根，git-bash）：`.venv/Scripts/python.exe packaging/build.py`
+   → 产物 `dist/pc-quote-flow.exe`（单文件、windowed；`build/`、`dist/` 不入库）。
+2. 双击 `dist/pc-quote-flow.exe`：首次运行登记姓名+角色，随后打开/新建 .xlsx 报价文件。
+3. 命令行自检（可选）：`dist\pc-quote-flow.exe --selftest`——windowed 无控制台输出，
+   以退出码表达结果（0=通过），同样输出写 `%TEMP%\pc-quote-flow-selftest.log`（末行 SELFTEST OK）。
+
+### 方式二：源码运行（开发/调试）
+
+```bash
+# 建 venv 并装依赖（uv + Python 3.11，清华镜像）
+uv venv --python "C:/Users/admin/AppData/Local/Programs/Python/Python311/python.exe" .venv
+uv pip install --python .venv/Scripts/python.exe --index-url https://pypi.tuna.tsinghua.edu.cn/simple -e ".[dev]"
+
+# 运行（可选直接打开文件）
+.venv/Scripts/python.exe -m pc_quote_flow [file.xlsx]
+
+# 无 GUI 自检（附录A/B 断言 + store 往返；stdout 打印，退出码 0=通过）
+.venv/Scripts/python.exe -m pc_quote_flow --selftest
+
+# 全量测试 / 独立数学核对 / 生成数学验证报告
+.venv/Scripts/python.exe -m pytest tests/ -q
+.venv/Scripts/python.exe scripts/verify_math.py
+.venv/Scripts/python.exe scripts/verify_math.py --report docs/math-verification-report.md
+```
 
 ## 状态
 
-设计已确认（v4），实现进行中。运行方式见后续 Release（单文件 exe）。
+设计已确认（v5），v0.1.0 功能实现完成（Task 1–10）。发布闸门：用户/财务按附录B.7
+人工核算 + GUI UAT（docs/uat-checklist.md）通过后打 tag `v0.1.0`（见 AGENTS.md §4）。

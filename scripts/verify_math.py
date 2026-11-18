@@ -10,6 +10,7 @@ C = B/(1+t)（精确成立）；应缴增值税 = B − 采购合计（B = S+P+P
 """
 import sys
 from decimal import Decimal as D, ROUND_HALF_UP
+from pathlib import Path
 
 from pc_quote_flow import model, pricing  # pricing=被测程序；独立重算全部在下方本地函数
 
@@ -146,6 +147,7 @@ def mk_doc(cfg: list[tuple], mode: str = "markup", rate: str = "0.10") -> model.
 
 _items: list[bool] = []
 _cases: dict[str, bool] = {}
+_records: list[dict] = []  # 供 --report 生成逐项对照表（确定性，无时间戳/随机值）
 
 
 def check(case: str, item: str, got, ind, table=None) -> None:
@@ -153,6 +155,7 @@ def check(case: str, item: str, got, ind, table=None) -> None:
     ok = got == ind and (table is None or got == table)
     _items.append(ok)
     _cases[case] = _cases.get(case, True) and ok
+    _records.append({"case": case, "item": item, "got": got, "ind": ind, "table": table, "ok": ok})
     tab = "" if table is None else f" 表={table}"
     print(f"[{'PASS' if ok else 'FAIL'}] {case} · {item}: 程序={got} 独立={ind}{tab}")
 
@@ -181,6 +184,123 @@ def case_four(row: str, cfg: list[tuple], mode: str, q_tab: str, profit_tab: str
     if markup_tab is not None:
         check(row, "加成率%", p2(dp.markup), p2(ip["markup"]), D(markup_tab))
     check(row, "毛利率%", p2(dp.margin), p2(ip["margin"]), D(margin_tab))
+
+
+# ---------- 数学验证报告（--report PATH；确定性输出，重跑字节一致） ----------
+
+# 附录B.7 期望值总表（逐字照抄设计文档 v5，唯一数学权威）
+B7_ROWS = [
+    ("1", "A 底价", "附录A配置A", "B=5800.00，C=5132.74，增值税=0.00"),
+    ("2", "A 加成10%", "r=10%", "Q=6380.00，利润513.27，加成10.00%，毛利9.09%"),
+    ("3", "A 毛利率10%", "m=10%", "Q=6444.44，利润570.30，毛利10.00%"),
+    ("4", "B 底价", "附录A配置B", "B=4130.00，C=3654.87，增值税=130.00"),
+    ("5", "B 加成10%", "r=10%", "Q=4543.00，利润365.49，加成10.00%，毛利9.09%"),
+    ("6", "B 毛利率10%", "m=10%", "Q=4588.89，利润406.10，毛利10.00%"),
+    ("7", "B 单项覆盖", "CPU 0%，其余12%加成", "Q=4490.00，利润318.58，整机加成8.72%"),
+    ("8", "B 反算写回", "T=4555.55 加成", "r*≈10.3039%，CPU件1246.44，合计=4555.55"),
+    ("9", "B 反算毛利率", "T=4588.89", "m* 显示10.00%"),
+    ("10", "B 采购回写", "CPU实际1050普票", "C'=3704.87，B'=4186.50，真实利润315.49（侵蚀提示）"),
+    ("11", "B 回写极端", "CPU实际2000普票", "真实利润 −634.51（红色警告）"),
+    ("12", "数量舍入", "99.99×3普票，加成10%", "件底价338.97，件报价372.86"),
+]
+
+
+def _fmt(v) -> str:
+    """报告单元格格式化（Decimal/列表/布尔→稳定字符串）。"""
+    if isinstance(v, bool):
+        return "是" if v else "否"
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(_fmt(x) for x in v) + "]"
+    return str(v)
+
+
+def _cfg_table(cfg: list[tuple]) -> str:
+    rows = ["| 部件 | 含税单价 | 数量 | 发票类型 |", "|---|---|---|---|"]
+    rows += [f"| {n} | {p} | {q} | {inv} |" for n, p, q, inv in cfg]
+    return "\n".join(rows)
+
+
+def write_report(path: Path) -> None:
+    """生成 docs/math-verification-report.md：独立重算 vs 程序输出 vs B.7 表逐项对照。
+
+    确定性：不含运行时间戳/随机值，全部取自本次比对记录与附录A/B常量，
+    重跑生成相同字节（避免 git churn）。独立侧不导入程序计算函数的口径不变。
+    """
+    passed = sum(1 for ok in _cases.values() if ok)
+    total = len(_cases)
+    bad = sum(1 for ok in _items if not ok)
+    by_case: dict[str, list[dict]] = {}
+    for rec in _records:
+        by_case.setdefault(rec["case"], []).append(rec)
+    ordered = sorted(by_case, key=lambda c: int(c.split()[0][1:]))  # 按行号 1..12
+
+    L: list[str] = []
+    L.append("# 数学验证报告（pc-quote-flow）")
+    L.append("")
+    L.append("> 依据：设计文档 v5 **附录B（唯一数学口径）** 与附录A虚构配置。")
+    L.append("> 生成命令：`.venv/Scripts/python.exe scripts/verify_math.py --report docs/math-verification-report.md`")
+    L.append("> 本报告为确定性输出（不含时间戳/随机值），重跑生成相同内容。")
+    L.append("> **全部数字为附录A虚构样例，非真实报价数据（红线1）。**")
+    L.append("")
+    L.append("## 1. 验证方法")
+    L.append("")
+    L.append("- **独立侧**：按附录B公式用 Decimal 从头重算（ROUND_HALF_UP 舍入到分、中间量全精度），")
+    L.append("  **不导入程序的 pricing/tax/money 计算函数**；pricing 仅作为被测程序调用，model 为纯数据类。")
+    L.append("- **逐项比对**：程序输出 vs 独立重算 vs 附录B.7 期望值总表（给出表期望时三者须一致）。")
+    L.append("- 行1/4 的不含税成本 C 与应缴增值税按 B.2 恒等式从程序底价导出比对：")
+    L.append("  C = B/(1+t)；应缴增值税 = B − 采购合计（B = S+P+P×t）。")
+    L.append("- 关键口径（附录B.1–B.5）：件底价贡献 专票=p×n、普票=p×n×(1+t)（全精度）；")
+    L.append("  件报价 加成=round(f×(1+r))、毛利率=round(f÷(1−m))；整机报价 Q=Σ舍入后件报价；")
+    L.append("  利润(不含税)=round((Q−B)/(1+t))；反解 r*=(T−B)/B、m*=(T−B)/T（全精度），")
+    L.append("  写回尾差 δ=T−Σq 仅由底价最大件吸收；采购回写有效价回退链 实际→确认→报价时。")
+    L.append("")
+    L.append("## 2. 虚构夹具（附录A逐字）")
+    L.append("")
+    L.append("### 配置A（全专票）")
+    L.append("")
+    L.append(_cfg_table(CFG_A))
+    L.append("")
+    L.append("### 配置B（CPU 普票，其余专票）")
+    L.append("")
+    L.append(_cfg_table(CFG_B))
+    L.append("")
+    L.append("## 3. 附录B.7 期望值总表（逐字，人工核算对照基准）")
+    L.append("")
+    L.append("| # | 用例 | 输入 | 期望输出 |")
+    L.append("|---|---|---|---|")
+    for num, name, inp, out in B7_ROWS:
+        L.append(f"| {num} | {name} | {inp} | {out} |")
+    L.append("")
+    L.append(f"## 4. 逐项对照（{total} 用例，{len(_items)} 项比对）")
+    L.append("")
+    b7_by_num = {num: (name, inp, out) for num, name, inp, out in B7_ROWS}
+    for case in ordered:
+        num = case.split()[0][1:]
+        name, inp, out = b7_by_num[num]
+        L.append(f"### 行{num} {name}")
+        L.append("")
+        L.append(f"输入：{inp}；B.7 期望：{out}")
+        L.append("")
+        L.append("| 比对项 | 程序输出 | 独立重算 | B.7表期望 | 结果 |")
+        L.append("|---|---|---|---|---|")
+        for rec in by_case[case]:
+            tab = "—" if rec["table"] is None else _fmt(rec["table"])
+            L.append(f"| {rec['item']} | {_fmt(rec['got'])} | {_fmt(rec['ind'])} | {tab} | "
+                     f"{'PASS' if rec['ok'] else 'FAIL'} |")
+        L.append("")
+    L.append("## 5. 结论")
+    L.append("")
+    L.append(f"汇总：数学核对 **{passed}/{total} 用例 PASS**（{len(_items)} 项比对，失败 {bad} 项）。")
+    L.append("")
+    if passed == total and bad == 0:
+        L.append("全部用例通过：程序输出与独立 Decimal 重算、附录B.7 期望值总表**三者一致**，")
+        L.append("数学口径验证通过。可交用户/财务按 B.7 人工核算（建议手算抽查：")
+        L.append("一件普票 1000×1.13=1130；一笔利润 (4543−4130)/1.13=365.49）。")
+    else:
+        L.append("**存在 FAIL 项（见上表），数学口径验证未通过**，须排障修复后重跑全部门禁。")
+    L.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(L), encoding="utf-8", newline="\n")
 
 
 def main() -> int:
@@ -276,4 +396,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # 默认无参：门禁③行为不变（print 逐项结果＋退出码）。
+    # --report PATH：额外生成确定性数学验证报告（docs/math-verification-report.md）。
+    args = sys.argv[1:]
+    report_path = None
+    if args:
+        if len(args) == 2 and args[0] == "--report":
+            report_path = Path(args[1])
+        else:
+            print("用法: verify_math.py [--report PATH]")
+            sys.exit(2)
+    code = main()
+    if report_path is not None:
+        write_report(report_path)
+        print(f"已生成数学验证报告: {report_path}")
+    sys.exit(code)
