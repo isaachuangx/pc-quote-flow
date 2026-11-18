@@ -46,3 +46,11 @@ def test_normalize_unknown_raises():
 def test_pct2():
     assert money.pct2(D("0.1")) == D("10.00")
     assert money.pct2(D("0.0909090909")) == D("9.09")
+
+
+def test_tax_profile_defaults():
+    """默认值钉死：rate=0.13（一般纳税人，v1 固定）；small_scale_rate=0.01
+    （小规模征收率预留参数，spec §5/§8，v1 公式不使用）。"""
+    p = tax.TaxProfile()
+    assert p.rate == D("0.13")
+    assert p.small_scale_rate == D("0.01")

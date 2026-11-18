@@ -1,6 +1,8 @@
 """税务口径：发票归一化、件底价贡献、不含税成本（设计文档 §8 与附录B.2/B.5）。
 
-v1 仅一般纳税人（税率 13%）；小规模征收率仅预留参数，不实现界面。
+v1 仅一般纳税人（rate=0.13）；small_scale_rate=0.01 为小规模征收率预留参数
+（spec §5/§8：底价=含税成本×(1+征收率)，利润=Q/(1+征收率)−含税成本），
+v1 不实现界面，v1 公式不使用该参数。
 所有函数返回全精度 Decimal，不舍入；舍入只在显示/输出层（money.fen）。
 """
 from dataclasses import dataclass
@@ -9,9 +11,16 @@ from decimal import Decimal
 
 @dataclass
 class TaxProfile:
-    """纳税人画像。v1 固定一般纳税人 rate=0.13；预留字段供后续扩展。"""
+    """纳税人画像。
+
+    rate：一般纳税人增值税率，v1 固定 0.13（设计文档 §5/附录B）。
+    small_scale_rate：小规模征收率预留参数，默认 0.01（spec §5/§8：
+        底价=含税成本×(1+征收率)，利润=Q/(1+征收率)−含税成本）；
+        v1 不实现，floor_contrib/cost_excl 不使用该字段。
+    """
 
     rate: Decimal = Decimal("0.13")
+    small_scale_rate: Decimal = Decimal("0.01")
 
 
 _INVOICE_ALIASES = {
