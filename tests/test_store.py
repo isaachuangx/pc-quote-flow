@@ -156,6 +156,7 @@ def test_external_edit_warning(cfg_a_lines, tmp_path):
     doc = make_doc("虚构配置A", cfg_a_lines)
     path = tmp_path / "a.xlsx"
     store.save(doc, path, stamp("创建文件"))
+    h1 = cell(path, "报价总览", "内容哈希")
     wb = openpyxl.load_workbook(path)
     ws = wb["部件明细"]
     headers = [c.value for c in ws[1]]
@@ -170,6 +171,10 @@ def test_external_edit_warning(cfg_a_lines, tmp_path):
     assert cell(path, "报价总览", "整机报价") == "6490.00"
     assert cell(path, "部件明细", "件底价", row=2) == "2100.00"
     assert cell(path, "部件明细", "件报价", row=2) == "2310.00"
+    # M3 留痕不丢：回写只刷派生列、不刷哈希单元格 → 外部改动警告持续到下次 save
+    assert cell(path, "报价总览", "内容哈希") == h1
+    _, warnings2 = store.load(path)
+    assert any("程序外被修改" in w for w in warnings2)
 
 
 def test_missing_sheet_error(cfg_a_lines, tmp_path):
@@ -250,3 +255,133 @@ def test_hash_stable_over_logs(cfg_a_lines, tmp_path):
     assert warnings == []
     assert loaded.content_hash == h1
     assert len(loaded.logs) == 3  # 两次 save 盖章 + 一条手工追加日志，只增
+
+
+# ---- 修复轮 1（审查 Important-1/Important-2）：空键行严格报错 / 条件回写 ----
+
+
+@pytest.mark.parametrize(
+    "sheet,key_col,rownum",
+    [("部件明细", "部件名", 3), ("审批记录", "轮次", 2), ("修改日志", "时间", 2)],
+)
+def test_blank_key_row_error(cfg_a_lines, tmp_path, sheet, key_col, rownum):
+    # I1：清空中间行键单元格（该行其余非空）→ StoreError 指明表名+Excel行号，不得静默截断
+    doc = make_doc("虚构配置A", cfg_a_lines)
+    if sheet == "审批记录":
+        for i in (1, 2):
+            doc.approvals.append(
+                model.ApprovalRecord(
+                    round=i,
+                    time=f"2026-11-18T14:0{i}:00",
+                    approver="虚构管理层",
+                    role="管理层",
+                    machine="XU-PC",
+                    win_account="xuni",
+                    conclusion="同意",
+                    opinion="虚构意见",
+                )
+            )
+    path = tmp_path / "a.xlsx"
+    store.save(doc, path, stamp("创建文件"))
+    if sheet == "修改日志":
+        store.save(doc, path, stamp("保存"))  # 两条日志行，清空首行键
+    wb = openpyxl.load_workbook(path)
+    ws = wb[sheet]
+    headers = [c.value for c in ws[1]]
+    ws.cell(row=rownum, column=headers.index(key_col) + 1).value = None
+    wb.save(path)
+    wb.close()
+    with pytest.raises(store.StoreError, match=f"{sheet}.*第 {rownum} 行"):
+        store.load(path)
+
+
+def test_fully_blank_rows_skipped(cfg_a_lines, tmp_path):
+    # I1：整行全空（中间清空行+尾部格式行）→ 跳过不报错，后续行不截断
+    doc = make_doc("虚构配置A", cfg_a_lines)
+    path = tmp_path / "a.xlsx"
+    store.save(doc, path, stamp("创建文件"))
+    wb = openpyxl.load_workbook(path)
+    ws = wb["部件明细"]
+    for c in ws[3]:  # 清空第 2 条明细整行（含派生列）
+        c.value = None
+    ws.append([""] * len(store.LINE_COLS))  # 尾部全空行（模拟 Excel 格式行）
+    wb.save(path)
+    wb.close()
+    loaded, warnings = store.load(path)
+    assert loaded.lines == doc.lines[:1] + doc.lines[2:]  # 8 件、顺序不变
+    assert len(loaded.logs) == 1
+    assert any("程序外被修改" in w for w in warnings)  # 内容变化 → 警告并回写
+    # 回写派生列须落在实际数据行号上（第 3 行已跳过，不得错位）
+    # 去掉主板 1000 后：B=5800−1000=4800.00；Q=6380−1100=5280.00（全专票，已用 Decimal 独立核算）
+    assert cell(path, "部件明细", "件底价", row=4) == "800.00"
+    assert cell(path, "报价总览", "整机底价") == "4800.00"
+    assert cell(path, "报价总览", "整机报价") == "5280.00"
+
+
+def test_clean_load_no_rewrite(cfg_a_lines, tmp_path):
+    # I2-③：干净 load（哈希一致）零写盘——字节/mtime 不变、无 .tmp 孤儿
+    doc = make_doc("虚构配置A", cfg_a_lines)
+    path = tmp_path / "a.xlsx"
+    store.save(doc, path, stamp("创建文件"))
+    before, mtime = path.read_bytes(), path.stat().st_mtime_ns
+    loaded, warnings = store.load(path)
+    assert warnings == []
+    assert loaded.lines == doc.lines
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == mtime
+    assert not path.with_suffix(".tmp").exists()
+
+
+def test_load_bak_never_rewrites(cfg_b_lines, tmp_path):
+    # I2-②：load(.bak) 永不改写备份——干净与被手改的备份均字节原样
+    doc = make_doc("虚构配置B", cfg_b_lines)
+    path = tmp_path / "b.xlsx"
+    store.save(doc, path, stamp("创建文件"))
+    store.save(doc, path, stamp("保存"))
+    bak = path.with_suffix(".bak")
+    before, mtime = bak.read_bytes(), bak.stat().st_mtime_ns
+    old, warnings = store.load(bak)
+    assert warnings == []
+    assert old.version == 1 and len(old.logs) == 1
+    assert bak.read_bytes() == before
+    assert bak.stat().st_mtime_ns == mtime
+    # 手改备份：照常警告+内存重算，但备份字节仍原样（取证原样性）
+    with bak.open("rb") as fh:
+        wb = openpyxl.load_workbook(fh)
+    ws = wb["部件明细"]
+    headers = [c.value for c in ws[1]]
+    ws.cell(row=2, column=headers.index("含税成本单价") + 1).value = "1100"
+    wb.save(bak)
+    wb.close()
+    before2, mtime2 = bak.read_bytes(), bak.stat().st_mtime_ns
+    old2, warnings2 = store.load(bak)
+    assert any("程序外被修改" in w for w in warnings2)
+    assert old2.lines[0].unit_price == D("1100")
+    assert bak.read_bytes() == before2
+    assert bak.stat().st_mtime_ns == mtime2
+    assert not bak.with_suffix(".tmp").exists()
+
+
+def test_writeback_failure_degrades(cfg_a_lines, tmp_path, monkeypatch):
+    # I2-①：回写遇 OSError（Excel 占用/只读）→ 降级警告，仍返回 doc，清理孤儿 .tmp
+    doc = make_doc("虚构配置A", cfg_a_lines)
+    path = tmp_path / "a.xlsx"
+    store.save(doc, path, stamp("创建文件"))
+    wb = openpyxl.load_workbook(path)
+    ws = wb["部件明细"]
+    headers = [c.value for c in ws[1]]
+    ws.cell(row=2, column=headers.index("含税成本单价") + 1).value = "2100"
+    wb.save(path)
+    wb.close()
+    before = path.read_bytes()
+
+    def locked(*a, **kw):
+        raise PermissionError("模拟：文件被 Excel 占用")
+
+    monkeypatch.setattr(store.os, "replace", locked)
+    loaded, warnings = store.load(path)  # 不得抛异常
+    assert loaded.lines[0].unit_price == D("2100")
+    assert any("程序外被修改" in w for w in warnings)
+    assert any("未能写回" in w for w in warnings)
+    assert path.read_bytes() == before  # 原文件完好
+    assert not path.with_suffix(".tmp").exists()  # 孤儿 tmp 已清理

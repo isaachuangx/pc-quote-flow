@@ -3,7 +3,8 @@
 结构按 task-4-brief：四表（报价总览/部件明细/审批记录/修改日志），表头第 1 行、数据第 2 行起；
 Decimal 以 str 写单元格、读回 Decimal；空值 None↔""/0 按字段类型映射；日期时间 ISO 字符串。
 派生列 = pricing.price_doc 输出（附录B为唯一数学权威，不新造公式）：save 时写入，
-load 时重算并刷新表内派生单元格（spec §9「程序打开即重算」；只刷派生列，不动哈希/版本/日志）。
+load 时重算（spec §9「程序打开即重算」）；仅当哈希不一致（外部改动）且非 .bak 时才回写
+刷新表内派生单元格（干净 load 零写盘；.bak 永不改写；回写遇 OSError 降级为警告）。
 加成率/毛利率列写百分比显示值（money.pct2，B.1「百分比显示保留 2 位小数」）。
 内容哈希排除版本号/日志/派生列 → 仅追加日志再 save 不触发外部改动警告。
 日志只增不改（红线4）；save 盖章九字段齐全，version 自动 +1 并同步 stamp.version。
@@ -39,7 +40,7 @@ HASH_LINE_FIELDS = [c for c in LINE_COLS if c not in ("件底价", "件报价")]
 
 
 class StoreError(Exception):
-    """读取错误：缺表/缺列（中文消息指明缺哪个表/列）。"""
+    """读取错误：缺表/缺列/空键行（中文消息指明缺哪个表/列，或哪表哪行键为空）。"""
 
 
 # 列头 → (dataclass 字段, 类型)。类型：str/int/dec/bool 及可空 dec?/str?（None↔""）。
@@ -172,16 +173,21 @@ def _overview_derived(dp) -> dict:
     }
 
 
-def _write_derived(wb, headers: dict, dp) -> None:
-    """把派生值写入总览第 2 行与明细各行（save 与 load 刷新共用）。"""
+def _write_derived(wb, headers: dict, dp, line_rows=None) -> None:
+    """把派生值写入总览第 2 行与明细各数据行（save 与 load 刷新共用）。
+
+    line_rows：load 回写时各明细行的实际 Excel 行号（跳过空行后行号可能不连续）；
+    save 时为 None，按连续行 i+2 写入。
+    """
     ws = wb["报价总览"]
     for col, val in _overview_derived(dp).items():
         ws.cell(row=2, column=headers["报价总览"][col]).value = val
     ws = wb["部件明细"]
     if dp is not None:
         for i, (f, q) in enumerate(zip(dp.line_floors, dp.line_quotes)):
-            ws.cell(row=i + 2, column=headers["部件明细"]["件底价"]).value = str(f)
-            ws.cell(row=i + 2, column=headers["部件明细"]["件报价"]).value = str(q)
+            r = line_rows[i] if line_rows is not None else i + 2
+            ws.cell(row=r, column=headers["部件明细"]["件底价"]).value = str(f)
+            ws.cell(row=r, column=headers["部件明细"]["件报价"]).value = str(q)
 
 
 def _build_workbook(doc: QuoteDoc, dp) -> openpyxl.Workbook:
@@ -248,8 +254,12 @@ def save(doc: QuoteDoc, path: Path, stamp: LogEntry) -> None:
 
 
 def load(path: Path) -> tuple[QuoteDoc, list[str]]:
-    """读入四表 → QuoteDoc；缺表/缺列 → StoreError；读入后重算派生列并刷新表内
-    派生单元格（打开即重算，spec §9）；哈希不一致 → warnings 追加「文件曾在程序外被修改」。
+    """读入四表 → QuoteDoc；缺表/缺列/空键行 → StoreError（中文指明表/列/行）。
+
+    读入后重算派生列（打开即重算，spec §9）；哈希不一致 → warnings 追加
+    「文件曾在程序外被修改」，且仅此时（并且非 .bak）才把派生列原子回写原路径：
+    干净 load 零写盘；.bak 永不改写（备份字节原样）；回写遇 OSError（占用/只读）
+    降级为警告，仍返回已读 doc。回写只刷派生列，不动哈希/版本/日志（留痕不丢）。
     """
     path = Path(path)
     # 以二进制流打开：.bak 备份同为 xlsx 内容，绕过 openpyxl 的扩展名限制（可恢复上一版）
@@ -279,7 +289,9 @@ def load(path: Path) -> tuple[QuoteDoc, list[str]]:
         for col, (attr, kind) in _OV.items()
     }
     doc = QuoteDoc(**ov)
-    # 明细/审批/日志：首列空即数据结束
+    # 明细/审批/日志：整行全空 → 跳过（尾部格式行是常态）；
+    # 键列空但该行其余任一单元格非空 → StoreError（防静默截断丢数据，日志表同样严格）
+    line_rows: list[int] = []  # 部件明细各数据行的实际 Excel 行号（回写派生列用）
     for name, spec, cls, key in (
         ("部件明细", _LN, QuoteLine, "部件名"),
         ("审批记录", _AP, ApprovalRecord, "轮次"),
@@ -288,21 +300,39 @@ def load(path: Path) -> tuple[QuoteDoc, list[str]]:
         ws = wb[name]
         h = headers[name]
         target = {"部件明细": doc.lines, "审批记录": doc.approvals, "修改日志": doc.logs}[name]
-        for row in ws.iter_rows(min_row=2):
+        for rownum, row in enumerate(ws.iter_rows(min_row=2), start=2):
+            if all(c.value is None or c.value == "" for c in row):
+                continue
             first = row[h[key] - 1].value
             if first is None or first == "":
-                break
+                wb.close()
+                raise StoreError(
+                    f"工作表「{name}」第 {rownum} 行「{key}」为空，但该行其他单元格非空；"
+                    f"请补全键列或整行清空后重新打开"
+                )
             target.append(cls(**{
                 attr: _from_cell(row[h[col] - 1].value, kind)
                 for col, (attr, kind) in spec.items()
             }))
+            if name == "部件明细":
+                line_rows.append(rownum)
     warnings: list[str] = []
-    if doc.content_hash != content_hash(doc):
+    dirty = doc.content_hash != content_hash(doc)
+    if dirty:
         warnings.append("文件曾在程序外被修改")
-    # 打开即重算派生列：只刷派生单元格（不动哈希/版本/日志），原子替换回原路径
-    _write_derived(wb, headers, _price(doc))
-    tmp = path.with_suffix(".tmp")
-    wb.save(tmp)
+    # 打开即重算恒发生（spec §9）；持久修复仅在外部改动时落盘，且 .bak 永不改写
+    dp = _price(doc)
+    if dirty and path.suffix != ".bak":
+        tmp = path.with_suffix(".tmp")
+        try:
+            _write_derived(wb, headers, dp, line_rows)
+            wb.save(tmp)
+            os.replace(tmp, path)
+        except OSError:
+            warnings.append("派生列已重算，但文件被占用或只读，未能写回；请关闭 Excel 后重新打开或保存")
+            try:
+                tmp.unlink(missing_ok=True)  # 尽力清理孤儿 tmp，失败不抛
+            except OSError:
+                pass
     wb.close()
-    os.replace(tmp, path)
     return doc, warnings
