@@ -1,0 +1,30 @@
+# ===== 真实报价数据永不入库 =====
+data/
+exports/
+*.quote.xlsx
+# 真实业务文件命名约定（配置名_客户_日期_vN.xlsx / 配置名_客户_审批_vN.xlsx）
+*_客户_*.xlsx
+*_审批_*.xlsx
+# samples/ 下的虚构样例 xlsx 允许入库（命名不含上述模式）
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ===== 打包产物 =====
+build/
+dist/
+*.exe
+*.spec.bak
+
+# ===== 本地配置与备份 =====
+*.bak
+~$*
+profile.json
+.DS_Store
+Thumbs.db
