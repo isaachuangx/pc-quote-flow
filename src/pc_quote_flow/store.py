@@ -28,7 +28,7 @@ SHEETS = ["报价总览", "部件明细", "审批记录", "修改日志"]
 
 OVERVIEW_COLS = ["配置名", "客户名", "报价日期", "有效期至", "状态", "版本号", "创建人", "修改人", "修改时间", "算法模式", "统一利润率", "整机底价", "整机报价", "利润额(不含税)", "加成率", "毛利率", "审批状态", "审批人", "审批时间", "审批意见", "最近导出人", "导出时间", "导出类型", "内容哈希", "备注"]
 
-LINE_COLS = ["部件名", "型号", "数量", "含税成本单价", "发票类型", "供应商", "平台", "商品链接", "价格已确认", "确认价", "确认发票类型", "单项利润率", "报价尾差调整", "件底价", "件报价", "实际成交价", "实际发票类型", "采购日期", "订单号", "备注"]
+LINE_COLS = ["部件名", "型号", "数量", "含税成本单价", "发票类型", "供应商", "平台", "商品链接", "价格已确认", "确认价", "确认发票类型", "单项利润率", "客户确认", "报价尾差调整", "件底价", "件报价", "实际成交价", "实际发票类型", "采购日期", "订单号", "备注"]
 
 APPROVAL_COLS = ["轮次", "时间", "审批人", "角色", "机器名", "Windows账户", "结论", "意见"]
 
@@ -79,6 +79,7 @@ _LN = {
     "确认价": ("confirm_price", "dec?"),
     "确认发票类型": ("confirm_invoice", "str?"),
     "单项利润率": ("item_rate", "dec?"),
+    "客户确认": ("customer_confirmed", "bool"),  # R46 销售侧客户确认（独立于「价格已确认」）
     "报价尾差调整": ("quote_adjust", "dec"),
     "实际成交价": ("actual_price", "dec?"),
     "实际发票类型": ("actual_invoice", "str?"),
@@ -111,14 +112,17 @@ _LG = {
 _DERIVED_NOTE = "派生列由程序计算，手改成本后请重新用程序打开"
 
 
-def content_hash(doc: QuoteDoc) -> str:
+def content_hash(doc: QuoteDoc, line_fields: list[str] | None = None) -> str:
     """内容哈希：sha256(json.dumps([总览哈希字段值], [明细各行哈希字段值], [审批记录]))。
 
     排除版本号/日志/派生列（件底价/件报价）与修改人/时间/导出溯源字段；
     ensure_ascii=False、sort_keys=True、default=str（Decimal→str）保证跨保存稳定。
+    line_fields：明细哈希字段集（默认 HASH_LINE_FIELDS）；R46 旧文件迁移时
+    传不含「客户确认」的旧字段集，使缺列旧文件不误报外部改动。
     """
     ov = [getattr(doc, _OV[c][0]) for c in HASH_OVERVIEW_FIELDS]
-    lns = [[getattr(ln, _LN[c][0]) for c in HASH_LINE_FIELDS] for ln in doc.lines]
+    fields = HASH_LINE_FIELDS if line_fields is None else line_fields
+    lns = [[getattr(ln, _LN[c][0]) for c in fields] for ln in doc.lines]
     aps = [asdict(a) for a in doc.approvals]
     payload = json.dumps([ov, lns, aps], ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -306,10 +310,14 @@ def load(path: Path) -> tuple[QuoteDoc, list[str]]:
     ):
         hdr = [c.value for c in wb[name][1]]
         missing = [c for c in cols if c not in hdr]
+        if name == "部件明细":
+            # R46 平滑迁移：旧文件缺「客户确认」列不报错（读行默认 False）；
+            # 其余缺列仍 StoreError（保留 R23 安全）
+            missing = [c for c in missing if c != "客户确认"]
         if missing:
             wb.close()
             raise StoreError(f"工作表「{name}」缺少列：{'、'.join(missing)}")
-        headers[name] = {c: hdr.index(c) + 1 for c in cols}
+        headers[name] = {c: hdr.index(c) + 1 for c in cols if c in hdr}
     # 报价总览（第 2 行）→ QuoteDoc 输入字段
     ws = wb["报价总览"]
     ov = {
@@ -341,11 +349,18 @@ def load(path: Path) -> tuple[QuoteDoc, list[str]]:
             target.append(cls(**{
                 attr: _from_cell(row[h[col] - 1].value, kind)
                 for col, (attr, kind) in spec.items()
+                if col in h  # R46 迁移：旧文件缺「客户确认」列 → 字段取 dataclass 默认 False
             }))
             if name == "部件明细":
                 line_rows.append(rownum)
     warnings: list[str] = []
-    dirty = doc.content_hash != content_hash(doc)
+    # R46 迁移：旧文件缺「客户确认」列时按旧字段集算哈希，迁移不算外部改动
+    legacy = "客户确认" not in headers["部件明细"]
+    expected = content_hash(
+        doc,
+        line_fields=[c for c in HASH_LINE_FIELDS if c != "客户确认"] if legacy else None,
+    )
+    dirty = doc.content_hash != expected
     if dirty:
         warnings.append("文件曾在程序外被修改")
     # 打开即重算恒发生（spec §9）；持久修复仅在外部改动时落盘，且备份永不改写

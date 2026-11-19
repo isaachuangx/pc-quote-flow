@@ -14,6 +14,8 @@ class QuoteLine:
     unit_price 为含税成本单价；confirm_* 为采购确认价/发票；
     item_rate 为单项利润率（None=跟随整机统一利润率）；
     quote_adjust 为反算写回的件报价调整；actual_* 为实际成交回写。
+    confirmed=「价格已确认」（采购侧遗留标志，只读、无逻辑消费，不动）；
+    customer_confirmed=「客户确认」（R46 销售侧状态标签，整单勾选为其聚合）。
     """
 
     name: str
@@ -28,6 +30,7 @@ class QuoteLine:
     confirm_price: Decimal | None = None
     confirm_invoice: str | None = None
     item_rate: Decimal | None = None
+    customer_confirmed: bool = False  # R46 客户确认（销售侧）；独立于采购侧遗留 confirmed
     quote_adjust: Decimal = Decimal("0")
     actual_price: Decimal | None = None
     actual_invoice: str | None = None
