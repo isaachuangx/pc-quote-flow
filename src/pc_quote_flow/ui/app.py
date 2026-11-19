@@ -26,7 +26,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QLabel, QMainWindow, QMessageBox,
-    QPushButton, QTabWidget, QToolBar,
+    QPushButton, QStyle, QTabWidget, QToolBar,
 )
 
 from .. import exports, identity, pricing, review, states, store, tax
@@ -245,6 +245,17 @@ class MainWindow(QMainWindow):
         self.btn_export_purchase = QPushButton("导出采购单")
         for b in (self.btn_export_customer, self.btn_export_approval, self.btn_export_purchase):
             tb.addWidget(b)  # 永不 disable（红线2：无权限门禁）
+        tb.addSeparator()
+        # R46 状态动作图标按钮：废弃→已废弃；恢复→已报价。
+        # 状态是流转备忘不是门禁：恒可用，非常规流转只留痕不拦截（红线2）
+        self.btn_discard = QPushButton("废弃")
+        self.btn_discard.setObjectName("btn_discard")
+        self.btn_discard.setIcon(self.style().standardIcon(QStyle.SP_DialogCancelButton))
+        self.btn_restore = QPushButton("恢复")
+        self.btn_restore.setObjectName("btn_restore")
+        self.btn_restore.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        tb.addWidget(self.btn_discard)
+        tb.addWidget(self.btn_restore)
         self.tabs = QTabWidget()
         self.sales_view = SalesView(self.doc, self.p)
         self.purchase_view = PurchaseView(self.doc, self.p)
@@ -280,6 +291,10 @@ class MainWindow(QMainWindow):
         self.btn_export_customer.clicked.connect(lambda: self._export("customer"))
         self.btn_export_approval.clicked.connect(lambda: self._export("approval"))
         self.btn_export_purchase.clicked.connect(lambda: self._export("purchase"))
+        # R46 状态动作按钮接线（完成采购在采购视图；废弃/恢复在工具栏）
+        self.purchase_view.complete_purchase_requested.connect(self._on_complete_purchase)
+        self.btn_discard.clicked.connect(self._on_discard)
+        self.btn_restore.clicked.connect(self._on_restore)
         self._update_operator_label()
         self.statusBar().showMessage("就绪")
 
@@ -461,6 +476,18 @@ class MainWindow(QMainWindow):
         )
         states.transition(self.doc, target, stamp)
         self._update_title()
+
+    def _on_complete_purchase(self) -> None:
+        """R46 采购视图「完成采购」→已完成（非常规流转不拦截只留痕，红线2）。"""
+        self._transition_status("已完成", "采购视图点击「完成采购」")
+
+    def _on_discard(self) -> None:
+        """R46 工具栏「废弃」→已废弃。"""
+        self._transition_status("已废弃", "工具栏点击「废弃」")
+
+    def _on_restore(self) -> None:
+        """R46 工具栏「恢复」→已报价（已废弃→已报价 非常规，只留痕不拦截）。"""
+        self._transition_status("已报价", "工具栏点击「恢复」")
 
     # ---- 反算写回（R22①：apply_reverse 返回文本→一条盖章，不双重 append）----
     def _open_reverse(self) -> None:

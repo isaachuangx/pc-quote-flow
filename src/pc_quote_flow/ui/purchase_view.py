@@ -14,9 +14,12 @@
 """
 from decimal import Decimal
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QGridLayout, QLabel, QMenu, QTableView, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout, QGridLayout, QLabel, QMenu, QPushButton, QStyle,
+    QTableView, QVBoxLayout, QWidget,
+)
 
 from .. import pricing, tax
 from ..money import fen
@@ -30,6 +33,9 @@ _EROSION_TEXT = "真实利润低于预期利润：采购成本侵蚀了利润（
 
 
 class PurchaseView(QWidget):
+    # R46「完成采购」请求（状态流转链在 MainWindow：盖章＋states.transition）
+    complete_purchase_requested = Signal()
+
     def __init__(self, doc: QuoteDoc, p: TaxProfile, parent=None):
         super().__init__(parent)
         self.doc = doc
@@ -38,6 +44,16 @@ class PurchaseView(QWidget):
         self.lbl_approval_status = QLabel()
         self.lbl_approval_status.setObjectName("lbl_approval_status")
         self.lbl_approval_status.setWordWrap(True)
+        # R46「完成采购」图标按钮：→已完成；恒可用不 disable（红线2），
+        # 非常规流转由 MainWindow 经 states.transition 只留痕不拦截
+        self.btn_complete_purchase = QPushButton("完成采购")
+        self.btn_complete_purchase.setObjectName("btn_complete_purchase")
+        self.btn_complete_purchase.setIcon(
+            self.style().standardIcon(QStyle.SP_DialogApplyButton))
+        self.btn_complete_purchase.clicked.connect(self.complete_purchase_requested)
+        top_row = QHBoxLayout()
+        top_row.addWidget(self.lbl_approval_status, 1)
+        top_row.addWidget(self.btn_complete_purchase)
         # 三层价格并列（B.5）：报价时底价 B ／ 确认后底价（确认价口径）／ 客户报价 Q
         self.lbl_floor_at_quote = QLabel("0.00")
         self.lbl_floor_confirmed = QLabel("0.00")
@@ -88,7 +104,7 @@ class PurchaseView(QWidget):
         self.lbl_warning.setWordWrap(True)
         self.lbl_warning.hide()
         lay = QVBoxLayout(self)
-        lay.addWidget(self.lbl_approval_status)
+        lay.addLayout(top_row)
         lay.addLayout(grid)
         lay.addLayout(agrid)
         lay.addWidget(self.lbl_erosion)

@@ -12,7 +12,7 @@ import openpyxl
 import pytest
 from PySide6.QtCore import Qt
 
-from pc_quote_flow import exports, identity, model, store, tax
+from pc_quote_flow import exports, identity, model, states, store, tax
 from pc_quote_flow.ui.app import MainWindow
 from pc_quote_flow.ui.dialogs import ReverseDialog
 
@@ -344,3 +344,75 @@ def test_checkbox_sync_after_load(qtbot, reg_profile, cfg_b_lines, tmp_path):
     win.load_file(path2)
     assert win.sales_view.chk_customer_confirm.isChecked()
     assert win.doc.status == "客户已确认"
+
+
+# ---- UI 层：图标状态动作按钮（R46 §5）-----------------------------------------
+
+
+def test_complete_purchase_button(qtbot, reg_profile, cfg_b_lines):
+    """采购视图「完成采购」图标按钮：采购中→已完成，一条状态流转留痕，标题同步。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    btn = win.purchase_view.btn_complete_purchase
+    assert btn.objectName() == "btn_complete_purchase"
+    assert btn.text() == "完成采购"
+    assert not btn.icon().isNull()  # 图标按钮
+    assert btn.isEnabled()
+    win.doc.status = "采购中"
+    n0 = len(win.doc.logs)
+    btn.click()
+    assert win.doc.status == "已完成"
+    assert len(win.doc.logs) == n0 + 1
+    g = win.doc.logs[-1]
+    assert g.action == "状态流转"  # 采购中→已完成 常规
+    assert "已完成" in g.summary
+    assert "已完成" in win.windowTitle()
+    assert btn.isEnabled()  # 点后不 disable（红线2）
+
+
+def test_complete_purchase_nonstandard_not_blocked(qtbot, reg_profile, cfg_b_lines):
+    """非常规流转（询价→已完成）不拦截：仍生效，仅日志加「非常规流转」前缀。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    assert win.doc.status == "询价"
+    win.purchase_view.btn_complete_purchase.click()
+    assert win.doc.status == "已完成"
+    assert win.doc.logs[-1].action == "非常规流转：状态流转"
+
+
+def test_discard_restore_toolbar_buttons(qtbot, reg_profile, cfg_b_lines):
+    """工具栏「废弃/恢复」图标按钮：已报价→已废弃→已报价（恢复非常规只留痕）。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    bd, br = win.btn_discard, win.btn_restore
+    assert bd.objectName() == "btn_discard" and bd.text() == "废弃"
+    assert br.objectName() == "btn_restore" and br.text() == "恢复"
+    assert not bd.icon().isNull() and not br.icon().isNull()
+    win.doc.status = "已报价"
+    n0 = len(win.doc.logs)
+    bd.click()
+    assert win.doc.status == "已废弃"
+    assert len(win.doc.logs) == n0 + 1
+    assert win.doc.logs[-1].action == "状态流转"  # 已报价→已废弃 常规
+    assert "已废弃" in win.windowTitle()
+    br.click()
+    assert win.doc.status == "已报价"
+    assert len(win.doc.logs) == n0 + 2
+    assert win.doc.logs[-1].action == "非常规流转：状态流转"  # 已废弃→已报价 非常规不拦截
+    assert "已报价" in win.windowTitle()
+    # 已完成→已废弃 亦常规可达
+    win.doc.status = "已完成"
+    bd.click()
+    assert win.doc.status == "已废弃"
+    assert win.doc.logs[-1].action == "状态流转"
+
+
+def test_status_buttons_never_disabled(qtbot, reg_profile, cfg_b_lines):
+    """红线2：任何状态下三个状态按钮恒可用（状态是备忘不是门禁）。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    for st in states.STATES:
+        win.doc.status = st
+        assert win.purchase_view.btn_complete_purchase.isEnabled()
+        assert win.btn_discard.isEnabled()
+        assert win.btn_restore.isEnabled()
