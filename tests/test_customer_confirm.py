@@ -346,17 +346,19 @@ def test_checkbox_sync_after_load(qtbot, reg_profile, cfg_b_lines, tmp_path):
     assert win.doc.status == "客户已确认"
 
 
-# ---- UI 层：图标状态动作按钮（R46 §5）-----------------------------------------
+# ---- UI 层：图标状态动作按钮（R46 §5：icon-only＋单按钮废弃/恢复切换）----------
 
 
 def test_complete_purchase_button(qtbot, reg_profile, cfg_b_lines):
-    """采购视图「完成采购」图标按钮：采购中→已完成，一条状态流转留痕，标题同步。"""
+    """采购视图 btn_complete 图标按钮（icon-only＋tooltip）：采购中→已完成，
+    盖章 action「完成采购」，标题同步。"""
     win = MainWindow(doc=_doc(cfg_b_lines))
     qtbot.addWidget(win)
-    btn = win.purchase_view.btn_complete_purchase
-    assert btn.objectName() == "btn_complete_purchase"
-    assert btn.text() == "完成采购"
-    assert not btn.icon().isNull()  # 图标按钮
+    btn = win.purchase_view.btn_complete
+    assert btn.objectName() == "btn_complete"
+    assert btn.text() == ""  # icon-only（简报 §5.1）
+    assert btn.toolTip() == "完成采购（状态→已完成）"
+    assert not btn.icon().isNull()
     assert btn.isEnabled()
     win.doc.status = "采购中"
     n0 = len(win.doc.logs)
@@ -364,7 +366,7 @@ def test_complete_purchase_button(qtbot, reg_profile, cfg_b_lines):
     assert win.doc.status == "已完成"
     assert len(win.doc.logs) == n0 + 1
     g = win.doc.logs[-1]
-    assert g.action == "状态流转"  # 采购中→已完成 常规
+    assert g.action == "完成采购"  # 采购中→已完成 常规
     assert "已完成" in g.summary
     assert "已完成" in win.windowTitle()
     assert btn.isEnabled()  # 点后不 disable（红线2）
@@ -375,44 +377,83 @@ def test_complete_purchase_nonstandard_not_blocked(qtbot, reg_profile, cfg_b_lin
     win = MainWindow(doc=_doc(cfg_b_lines))
     qtbot.addWidget(win)
     assert win.doc.status == "询价"
-    win.purchase_view.btn_complete_purchase.click()
+    win.purchase_view.btn_complete.click()
     assert win.doc.status == "已完成"
-    assert win.doc.logs[-1].action == "非常规流转：状态流转"
+    assert win.doc.logs[-1].action == "非常规流转：完成采购"
 
 
-def test_discard_restore_toolbar_buttons(qtbot, reg_profile, cfg_b_lines):
-    """工具栏「废弃/恢复」图标按钮：已报价→已废弃→已报价（恢复非常规只留痕）。"""
+def test_discard_restore_toggle_button(qtbot, reg_profile, cfg_b_lines):
+    """工具栏 btn_discard 单按钮切换：未废弃→废弃（action 废弃报价单）；
+    已废弃→恢复（action 恢复报价单，非常规只留痕）；icon/tooltip 随状态切换。"""
     win = MainWindow(doc=_doc(cfg_b_lines))
     qtbot.addWidget(win)
-    bd, br = win.btn_discard, win.btn_restore
-    assert bd.objectName() == "btn_discard" and bd.text() == "废弃"
-    assert br.objectName() == "btn_restore" and br.text() == "恢复"
-    assert not bd.icon().isNull() and not br.icon().isNull()
+    bd = win.btn_discard
+    assert bd.objectName() == "btn_discard"
+    assert bd.text() == ""  # icon-only（简报 §5.2）
+    assert not bd.icon().isNull()
     win.doc.status = "已报价"
+    win.refresh_pricing()
+    assert bd.toolTip() == "废弃此报价单（状态→已废弃）"
+    icon_before = bd.icon().cacheKey()
     n0 = len(win.doc.logs)
     bd.click()
     assert win.doc.status == "已废弃"
     assert len(win.doc.logs) == n0 + 1
-    assert win.doc.logs[-1].action == "状态流转"  # 已报价→已废弃 常规
+    assert win.doc.logs[-1].action == "废弃报价单"  # 已报价→已废弃 常规
     assert "已废弃" in win.windowTitle()
-    br.click()
+    # 已废弃态：icon/tooltip 切换为「恢复」
+    assert bd.toolTip() == "恢复（状态→已报价）"
+    assert bd.icon().cacheKey() != icon_before
+    bd.click()
     assert win.doc.status == "已报价"
     assert len(win.doc.logs) == n0 + 2
-    assert win.doc.logs[-1].action == "非常规流转：状态流转"  # 已废弃→已报价 非常规不拦截
+    assert win.doc.logs[-1].action == "非常规流转：恢复报价单"  # 已废弃→已报价 非常规不拦截
     assert "已报价" in win.windowTitle()
+    assert bd.toolTip() == "废弃此报价单（状态→已废弃）"
     # 已完成→已废弃 亦常规可达
     win.doc.status = "已完成"
+    win.refresh_pricing()
     bd.click()
     assert win.doc.status == "已废弃"
-    assert win.doc.logs[-1].action == "状态流转"
+    assert win.doc.logs[-1].action == "废弃报价单"
 
 
 def test_status_buttons_never_disabled(qtbot, reg_profile, cfg_b_lines):
-    """红线2：任何状态下三个状态按钮恒可用（状态是备忘不是门禁）。"""
+    """红线2：任何状态下状态按钮恒可用（状态是备忘不是门禁）。"""
     win = MainWindow(doc=_doc(cfg_b_lines))
     qtbot.addWidget(win)
     for st in states.STATES:
         win.doc.status = st
-        assert win.purchase_view.btn_complete_purchase.isEnabled()
+        win.refresh_pricing()
+        assert win.purchase_view.btn_complete.isEnabled()
         assert win.btn_discard.isEnabled()
-        assert win.btn_restore.isEnabled()
+
+
+def test_auto_revoke_extended_fields(qtbot, reg_profile, cfg_b_lines):
+    """简报 §3 全撤销字段集：部件名/型号/发票类型/确认发票类型/实际成交价/
+    实际发票类型 变更亦撤销该件确认（数量/成本/利润率/确认价另测）。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    chk = win.sales_view.chk_customer_confirm
+    sm, pm = win.sales_view.model, win.purchase_view.model
+    sh, ph = _hdr(sm), _hdr(pm)
+    cases = [
+        (sm, sh, "部件名", "虚构部件改名", 0),
+        (sm, sh, "型号", "虚构型号X", 1),
+        (pm, ph, "发票类型", None, 2),       # 取与现值相反的 专票/普票
+        (pm, ph, "确认发票类型", "普票", 3),
+        (pm, ph, "实际成交价", "1300", 4),
+        (pm, ph, "实际发票类型", "专票", 5),
+    ]
+    for m, h, header, val, r in cases:
+        if not chk.isChecked():
+            chk.click()
+        assert win.doc.status == "客户已确认"
+        if val is None:  # 发票类型：取反，保证值确实改变
+            val = "普票" if win.doc.lines[r].invoice == "专票" else "专票"
+        n0 = len(win.doc.logs)
+        assert m.setData(m.index(r, h[header]), val, Qt.EditRole), header
+        assert win.doc.lines[r].customer_confirmed is False, header
+        assert win.doc.status == "已报价", header
+        assert "客户确认已撤销" in win.doc.logs[-2].summary, header
+        assert len(win.doc.logs) == n0 + 2  # 编辑＋聚合流转

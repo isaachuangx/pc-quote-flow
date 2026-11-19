@@ -34,7 +34,7 @@ _EROSION_TEXT = "真实利润低于预期利润：采购成本侵蚀了利润（
 
 class PurchaseView(QWidget):
     # R46「完成采购」请求（状态流转链在 MainWindow：盖章＋states.transition）
-    complete_purchase_requested = Signal()
+    complete_requested = Signal()
 
     def __init__(self, doc: QuoteDoc, p: TaxProfile, parent=None):
         super().__init__(parent)
@@ -44,16 +44,16 @@ class PurchaseView(QWidget):
         self.lbl_approval_status = QLabel()
         self.lbl_approval_status.setObjectName("lbl_approval_status")
         self.lbl_approval_status.setWordWrap(True)
-        # R46「完成采购」图标按钮：→已完成；恒可用不 disable（红线2），
-        # 非常规流转由 MainWindow 经 states.transition 只留痕不拦截
-        self.btn_complete_purchase = QPushButton("完成采购")
-        self.btn_complete_purchase.setObjectName("btn_complete_purchase")
-        self.btn_complete_purchase.setIcon(
-            self.style().standardIcon(QStyle.SP_DialogApplyButton))
-        self.btn_complete_purchase.clicked.connect(self.complete_purchase_requested)
+        # R46「完成采购」icon-only 图标按钮（简报 §5.1）：→已完成；
+        # 恒可用不 disable（红线2），非常规流转由 MainWindow 只留痕不拦截
+        self.btn_complete = QPushButton()
+        self.btn_complete.setObjectName("btn_complete")
+        self.btn_complete.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
+        self.btn_complete.setToolTip("完成采购（状态→已完成）")
+        self.btn_complete.clicked.connect(self.complete_requested)
         top_row = QHBoxLayout()
         top_row.addWidget(self.lbl_approval_status, 1)
-        top_row.addWidget(self.btn_complete_purchase)
+        top_row.addWidget(self.btn_complete)
         # 三层价格并列（B.5）：报价时底价 B ／ 确认后底价（确认价口径）／ 客户报价 Q
         self.lbl_floor_at_quote = QLabel("0.00")
         self.lbl_floor_confirmed = QLabel("0.00")

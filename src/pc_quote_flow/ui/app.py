@@ -246,16 +246,12 @@ class MainWindow(QMainWindow):
         for b in (self.btn_export_customer, self.btn_export_approval, self.btn_export_purchase):
             tb.addWidget(b)  # 永不 disable（红线2：无权限门禁）
         tb.addSeparator()
-        # R46 状态动作图标按钮：废弃→已废弃；恢复→已报价。
+        # R46 废弃/恢复单按钮切换（简报 §5.2，icon-only）：未废弃→废弃；
+        # 已废弃→恢复。icon/tooltip 随状态在 _sync_status_buttons 切换。
         # 状态是流转备忘不是门禁：恒可用，非常规流转只留痕不拦截（红线2）
-        self.btn_discard = QPushButton("废弃")
+        self.btn_discard = QPushButton()
         self.btn_discard.setObjectName("btn_discard")
-        self.btn_discard.setIcon(self.style().standardIcon(QStyle.SP_DialogCancelButton))
-        self.btn_restore = QPushButton("恢复")
-        self.btn_restore.setObjectName("btn_restore")
-        self.btn_restore.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
         tb.addWidget(self.btn_discard)
-        tb.addWidget(self.btn_restore)
         self.tabs = QTabWidget()
         self.sales_view = SalesView(self.doc, self.p)
         self.purchase_view = PurchaseView(self.doc, self.p)
@@ -291,10 +287,9 @@ class MainWindow(QMainWindow):
         self.btn_export_customer.clicked.connect(lambda: self._export("customer"))
         self.btn_export_approval.clicked.connect(lambda: self._export("approval"))
         self.btn_export_purchase.clicked.connect(lambda: self._export("purchase"))
-        # R46 状态动作按钮接线（完成采购在采购视图；废弃/恢复在工具栏）
-        self.purchase_view.complete_purchase_requested.connect(self._on_complete_purchase)
-        self.btn_discard.clicked.connect(self._on_discard)
-        self.btn_restore.clicked.connect(self._on_restore)
+        # R46 状态动作按钮接线（完成采购在采购视图；废弃/恢复单按钮在工具栏）
+        self.purchase_view.complete_requested.connect(self._on_complete_purchase)
+        self.btn_discard.clicked.connect(self._on_discard_toggle)
         self._update_operator_label()
         self.statusBar().showMessage("就绪")
 
@@ -310,6 +305,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"{loc} ｜ 状态：{self.doc.status} ｜ 有效期至：{self.doc.valid_until or '—'} ｜ v{self.doc.version}"
         )
+        self._sync_status_buttons()  # R46 废弃/恢复 icon/tooltip 随状态同步
 
     # ---- 统一刷新（R22②③：一切刷新走 price_doc；Task 9 三视图同步）----
     def refresh_pricing(self) -> None:
@@ -467,11 +463,11 @@ class MainWindow(QMainWindow):
         elif not all_confirmed and self.doc.status == "客户已确认":
             self._transition_status("已报价", "客户确认聚合破坏（部件撤销/报价变更）")
 
-    def _transition_status(self, target: str, reason: str) -> None:
+    def _transition_status(self, target: str, reason: str, action: str = "状态流转") -> None:
         """R46 状态流转：states.transition 留痕（非常规加前缀），随后同步标题/状态栏。"""
         old = self.doc.status
         stamp = identity.make_stamp(
-            self.profile, view=self.current_view(), action="状态流转",
+            self.profile, view=self.current_view(), action=action,
             summary=f"{old}→{target}：{reason}", version=self.doc.version,
         )
         states.transition(self.doc, target, stamp)
@@ -479,15 +475,25 @@ class MainWindow(QMainWindow):
 
     def _on_complete_purchase(self) -> None:
         """R46 采购视图「完成采购」→已完成（非常规流转不拦截只留痕，红线2）。"""
-        self._transition_status("已完成", "采购视图点击「完成采购」")
+        self._transition_status("已完成", "采购视图点击「完成采购」", action="完成采购")
+        self.refresh_pricing()
 
-    def _on_discard(self) -> None:
-        """R46 工具栏「废弃」→已废弃。"""
-        self._transition_status("已废弃", "工具栏点击「废弃」")
+    def _on_discard_toggle(self) -> None:
+        """R46 工具栏废弃/恢复单按钮：已废弃→已报价（恢复）；否则→已废弃。"""
+        if self.doc.status == "已废弃":
+            self._transition_status("已报价", "工具栏点击「恢复」", action="恢复报价单")
+        else:
+            self._transition_status("已废弃", "工具栏点击「废弃」", action="废弃报价单")
+        self.refresh_pricing()
 
-    def _on_restore(self) -> None:
-        """R46 工具栏「恢复」→已报价（已废弃→已报价 非常规，只留痕不拦截）。"""
-        self._transition_status("已报价", "工具栏点击「恢复」")
+    def _sync_status_buttons(self) -> None:
+        """R46 btn_discard 的 icon/tooltip 随状态切换（简报 §5.2）；永不 disable。"""
+        if self.doc.status == "已废弃":
+            self.btn_discard.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+            self.btn_discard.setToolTip("恢复（状态→已报价）")
+        else:
+            self.btn_discard.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
+            self.btn_discard.setToolTip("废弃此报价单（状态→已废弃）")
 
     # ---- 反算写回（R22①：apply_reverse 返回文本→一条盖章，不双重 append）----
     def _open_reverse(self) -> None:

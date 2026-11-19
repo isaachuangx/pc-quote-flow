@@ -57,8 +57,10 @@ _EDITABLE = {
     "审阅": set(),
 }
 
-# R46 报价/成本字段：变更即自动撤销该件「客户确认」（仅状态标签＋聚合，不动定价数学）
-_REVOKE_FIELDS = {"qty", "unit_price", "item_rate", "confirm_price"}
+# R46 报价/成本字段（简报 §3 全集）：变更即自动撤销该件「客户确认」
+# （仅状态标签＋聚合，不动定价数学）；供应商/平台/链接/采购日期/订单号/备注不触发
+_REVOKE_FIELDS = {"name", "model", "qty", "item_rate", "unit_price", "invoice",
+                  "confirm_price", "confirm_invoice", "actual_price", "actual_invoice"}
 
 
 class QuoteTableModel(QAbstractTableModel):
@@ -187,7 +189,7 @@ class QuoteTableModel(QAbstractTableModel):
         revoked = ""
         if field in _REVOKE_FIELDS and ln.customer_confirmed:
             ln.customer_confirmed = False
-            revoked = "（客户确认已撤销：报价/成本字段变更）"
+            revoked = "；客户确认已撤销"
         self.dataChanged.emit(index, index)
         self.refresh()
         new_disp = self.data(index, Qt.DisplayRole)
