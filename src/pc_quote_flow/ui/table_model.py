@@ -144,8 +144,15 @@ class QuoteTableModel(QAbstractTableModel):
         if not index.isValid():
             return Qt.NoItemFlags
         f = Qt.ItemIsSelectable | Qt.ItemIsEnabled
-        if self.cols[index.column()][0] in self._editable:
+        header, field, kind = self.cols[index.column()]
+        if header in self._editable:
             f |= Qt.ItemIsEditable
+            # R47：「客户确认」勾选列须 ItemIsUserCheckable，鼠标单击勾选框才能切换。
+            # 缺此 flag 时 QStyledItemDelegate 渲染勾选框但不响应点击（整单框是真
+            # QCheckBox 不受影响）——修复 R46「整单可勾、逐件点不动」。采购/审阅
+            # 该列不在可编辑白名单，无此 flag，只读展示不可点（视图编辑权，红线2）。
+            if field == "customer_confirmed":
+                f |= Qt.ItemIsUserCheckable
         return f
 
     def setData(self, index, value, role=Qt.EditRole) -> bool:
@@ -156,7 +163,7 @@ class QuoteTableModel(QAbstractTableModel):
             # R46「客户确认」勾选写入（仅销售视图可编辑；采购/审阅由 flags 拒写）
             if field != "customer_confirmed" or not (self.flags(index) & Qt.ItemIsEditable):
                 return False
-            value = "是" if value == Qt.Checked else "否"
+            value = "是" if Qt.CheckState(value) == Qt.Checked else "否"
             role = Qt.EditRole
         if role != Qt.EditRole:
             return False

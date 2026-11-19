@@ -457,3 +457,74 @@ def test_auto_revoke_extended_fields(qtbot, reg_profile, cfg_b_lines):
         assert win.doc.status == "已报价", header
         assert "客户确认已撤销" in win.doc.logs[-2].summary, header
         assert len(win.doc.logs) == n0 + 2  # 编辑＋聚合流转
+
+
+# ---- R47：逐件「客户确认」单元格鼠标可点（修复 R46 整单可勾、逐件点不动）----
+
+
+def test_customer_confirm_cell_user_checkable(qtbot, reg_profile, cfg_b_lines):
+    """R47：销售「客户确认」单元格 flags 须含 ItemIsUserCheckable（鼠标单击可切换）。
+
+    缺此 flag 时 QStyledItemDelegate 仍渲染勾选框但不响应鼠标点击——整单框是真
+    QCheckBox 不受影响，故 R46 出现「整单可勾、逐件点不动」。R46 测试经 setData
+    程序化写入绕过了点击路径而全绿；本测试钉死鼠标可点的必要条件 flags。
+    """
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    sm = win.sales_view.model
+    sf = sm.flags(sm.index(0, _hdr(sm)["客户确认"]))
+    assert sf & Qt.ItemIsEditable
+    assert sf & Qt.ItemIsUserCheckable          # 鼠标可点必要条件（R47 修复点）
+    for view in (win.purchase_view, win.review_view):
+        m = view.model
+        f = m.flags(m.index(0, _hdr(m)["客户确认"]))
+        assert not (f & Qt.ItemIsEditable)       # 只读展示
+        assert not (f & Qt.ItemIsUserCheckable)  # 采购/审阅不可点
+
+
+def test_customer_confirm_cell_mouse_click(qtbot, reg_profile, cfg_b_lines):
+    """R47：鼠标单击销售「客户确认」单元格勾选框 → 该件确认翻转＋一条盖章（端到端可点）。
+
+    钉死两处修复：① flags 含 ItemIsUserCheckable（委托才响应点击）；② setData 用
+    Qt.CheckState(value) 归一（委托鼠标路径传 int 2，直接 ==Qt.Checked 对 int 判 False）。
+    """
+    from PySide6.QtWidgets import QStyle, QStyleOptionViewItem, QAbstractItemView
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    win.resize(1500, 800)
+    win.show()
+    sm = win.sales_view.model
+    idx = sm.index(0, _hdr(sm)["客户确认"])
+    assert win.doc.lines[0].customer_confirmed is False
+    view = win.sales_view.table
+    view.scrollTo(idx, QAbstractItemView.EnsureVisible)  # 该列靠右，先滚进视口
+    qtbot.wait(20)
+    opt = QStyleOptionViewItem()
+    opt.rect = view.visualRect(idx)
+    opt.features = QStyleOptionViewItem.HasCheckIndicator
+    opt.checkState = Qt.Unchecked
+    check = view.style().subElementRect(QStyle.SE_ItemViewItemCheckIndicator, opt, view)
+    n0 = len(win.doc.logs)
+    qtbot.mouseClick(view.viewport(), Qt.LeftButton, pos=check.center())
+    assert win.doc.lines[0].customer_confirmed is True   # 单击勾选框即翻转
+    assert len(win.doc.logs) == n0 + 1                    # 编辑盖章（未全件确认，无聚合流转）
+    qtbot.mouseClick(view.viewport(), Qt.LeftButton, pos=check.center())
+    assert win.doc.lines[0].customer_confirmed is False  # 再点取消
+
+
+def test_customer_confirm_setdata_int_checkstate(qtbot, reg_profile, cfg_b_lines):
+    """R47：setData 经 CheckStateRole 传 int（委托鼠标路径 static_cast<int>）须正确翻转。
+
+    PySide6 严格枚举 2 == Qt.Checked 为 False；须 Qt.CheckState(value) 归一，
+    int 与枚举两种入参都兼容（R46 测试只传枚举故漏检鼠标 int 路径）。
+    """
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    sm = win.sales_view.model
+    idx = sm.index(0, _hdr(sm)["客户确认"])
+    assert sm.setData(idx, 2, Qt.CheckStateRole) is True   # int Checked
+    assert win.doc.lines[0].customer_confirmed is True
+    assert sm.setData(idx, 0, Qt.CheckStateRole) is True   # int Unchecked
+    assert win.doc.lines[0].customer_confirmed is False
+    assert sm.setData(idx, Qt.Checked, Qt.CheckStateRole) is True  # 枚举仍兼容
+    assert win.doc.lines[0].customer_confirmed is True
