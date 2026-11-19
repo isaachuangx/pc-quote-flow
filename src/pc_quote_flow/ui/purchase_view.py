@@ -119,6 +119,11 @@ class PurchaseView(QWidget):
         except (ValueError, ArithmeticError) as e:  # 脏发票/非有限价 → 降级不崩
             self.show_calc_error(str(e))
             return
+        # I2：fen(NaN)=NaN 静默不抛（quantize 对 NaN 不报错），须显式守卫非有限，
+        # 否则下方 floor_conf > dp.quote 抛 InvalidOperation 逃逸；None（空 doc）放行
+        if floor_conf is not None and not floor_conf.is_finite():
+            self.show_calc_error("确认后底价非有限（确认价/成本价含 NaN/Infinity）")
+            return
         self.lbl_floor_at_quote.setText(str(dp.floor))
         self.lbl_floor_confirmed.setText(str(floor_conf))
         self.lbl_quote.setText(str(dp.quote))

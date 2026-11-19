@@ -229,28 +229,56 @@ def _build_workbook(doc: QuoteDoc, dp) -> openpyxl.Workbook:
     return wb
 
 
-def save(doc: QuoteDoc, path: Path, stamp: LogEntry) -> None:
-    """原子保存：logs.append(stamp)、version+=1、modifier/modify_time 取自 stamp、
-    重算派生列与哈希；写 .tmp → 旧文件 os.replace 为 .bak → tmp os.replace 为 path。
+def _atomic_write_workbook(wb: openpyxl.Workbook, path: Path, *, backup: bool = False) -> None:
+    """原子写工作簿：wb.save(tmp) →（backup=True 时旧文件→.bak）→ os.replace(tmp, path)。
 
+    失败清理孤儿 tmp 后原样抛出（回滚策略由调用方决定）；save 与三导出共用，
+    避免两处原子写实现漂移（终审 OS2/T6M1）。
+    """
+    tmp = path.with_suffix(".tmp")
+    try:
+        wb.save(tmp)
+        if backup and path.exists():
+            os.replace(path, path.with_suffix(".bak"))
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    finally:
+        wb.close()
+
+
+def save(doc: QuoteDoc, path: Path, stamp: LogEntry) -> None:
+    """原子保存：先定价（fail-fast）再 logs.append(stamp)、version+=1、
+    modifier/modify_time 取自 stamp、重算哈希；写 .tmp → 旧文件→.bak → tmp→path。
+
+    终审 OS2：定价先于一切 mutation——全零成本（unit_price=0 合法）_price 抛
+    DivisionUndefined 时不得留幻影版本/日志/修改人；写盘失败回滚全部 mutation
+    （version/logs/modifier/modify_time/content_hash/stamp.version）再 raise，
+    保证「要么全部落盘，要么全不变」。
     stamp 由调用方传入且每次保存必须独立（不复用对象）；save 同步 stamp.version
     为最新版本，保证盖章九字段中的文件版本正确（红线4）。
     """
     path = Path(path)
+    dp = _price(doc)  # fail-fast：定价先于一切 mutation（OS2）
+    old = (doc.version, doc.modifier, doc.modify_time, doc.content_hash, stamp.version)
     doc.version += 1
     stamp.version = doc.version
     doc.logs.append(stamp)
     doc.modifier = stamp.operator
     doc.modify_time = stamp.time
-    dp = _price(doc)
     doc.content_hash = content_hash(doc)
-    wb = _build_workbook(doc, dp)
-    tmp = path.with_suffix(".tmp")
-    wb.save(tmp)
-    wb.close()
-    if path.exists():
-        os.replace(path, path.with_suffix(".bak"))
-    os.replace(tmp, path)
+    try:
+        wb = _build_workbook(doc, dp)
+        _atomic_write_workbook(wb, path, backup=True)
+    except Exception:
+        # 写盘失败：回滚幻影 mutation，内存 doc 与磁盘保持一致（OS2）
+        doc.version, doc.modifier, doc.modify_time, doc.content_hash, stamp.version = old
+        doc.logs.pop()
+        raise
 
 
 def load(path: Path) -> tuple[QuoteDoc, list[str]]:
@@ -320,9 +348,10 @@ def load(path: Path) -> tuple[QuoteDoc, list[str]]:
     dirty = doc.content_hash != content_hash(doc)
     if dirty:
         warnings.append("文件曾在程序外被修改")
-    # 打开即重算恒发生（spec §9）；持久修复仅在外部改动时落盘，且 .bak 永不改写
+    # 打开即重算恒发生（spec §9）；持久修复仅在外部改动时落盘，且备份永不改写
+    # （T4.BAK：后缀豁免大小写不敏感，.BAK 与 .bak 同等待遇，不再对备份再生备份）
     dp = _price(doc)
-    if dirty and path.suffix != ".bak":
+    if dirty and path.suffix.lower() != ".bak":
         tmp = path.with_suffix(".tmp")
         try:
             _write_derived(wb, headers, dp, line_rows)

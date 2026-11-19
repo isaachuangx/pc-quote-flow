@@ -14,7 +14,7 @@
 
 ## 核心功能
 
-- **底价自动计算**：专票按含税价、普票按含税价×1.13（一般纳税人 13%，普票进项不可抵扣）；税率/纳税人身份可配置。
+- **底价自动计算**：专票按含税价、普票按含税价×1.13（一般纳税人 13%，普票进项不可抵扣）；税率 v1 固定 13%（一般纳税人，设置框只读展示），小规模 1% 征收率仅为预留参数、v1 未实现切换。
 - **两种利润算法**：成本加成（默认）与销售毛利率，开关切换；统一利润率与单项利润率并存；支持反算（输入谈妥价→反解利润率，可写回）。
 - **四数同屏**：客户报价 / 利润额（不含税）/ 加成率 / 销售毛利率。
 - **三种导出严格隔离**：客户报价单（脱敏，不带成本/供应商/链接）、审批文件（全部内部数据+合理性摘要）、采购单（确认价+发票+链接+订单号栏）。
@@ -49,14 +49,15 @@ Python 3.11+ / PySide6 / openpyxl / Decimal 精确计算 / PyInstaller 打包单
 1. 构建（仓库根，git-bash）：`.venv/Scripts/python.exe packaging/build.py`
    → 产物 `dist/pc-quote-flow.exe`（单文件、windowed；`build/`、`dist/` 不入库）。
 2. 双击 `dist/pc-quote-flow.exe`：首次运行登记姓名+角色，随后打开/新建 .xlsx 报价文件。
-3. 命令行自检（可选）：`dist\pc-quote-flow.exe --selftest`——windowed 无控制台输出，
-   以退出码表达结果（0=通过），同样输出写 `%TEMP%\pc-quote-flow-selftest.log`（末行 SELFTEST OK）。
+3. 命令行自检（可选）：`dist/pc-quote-flow.exe --selftest`——windowed 无控制台输出，
+   以退出码表达结果（0=通过；git-bash 用 `echo $?` 查看，cmd 用 `echo %errorlevel%`），
+   同样输出写 `$TEMP/pc-quote-flow-selftest.log`（末行 SELFTEST OK；cmd 语境为 `%TEMP%\pc-quote-flow-selftest.log`）。
 
 ### 方式二：源码运行（开发/调试）
 
 ```bash
 # 建 venv 并装依赖（uv + Python 3.11，清华镜像）
-uv venv --python "C:/Users/admin/AppData/Local/Programs/Python/Python311/python.exe" .venv
+uv venv --python 3.11 .venv
 uv pip install --python .venv/Scripts/python.exe --index-url https://pypi.tuna.tsinghua.edu.cn/simple -e ".[dev]"
 
 # 运行（可选直接打开文件）

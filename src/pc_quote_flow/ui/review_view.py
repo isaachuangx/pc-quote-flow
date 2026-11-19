@@ -61,13 +61,16 @@ class LogTableModel(QAbstractTableModel):
 
 
 class ReviewView(QWidget):
-    approval_requested = Signal(str, str)  # (结论, 意见) → MainWindow 盖章 record_approval
+    # I1：携框内 doc（ApprovalDialog.doc）→ MainWindow 对框内 doc 盖章 record_approval，
+    # 换 doc 后残留提交不得落到当前 self.doc（非模态框 doc 错配）
+    approval_requested = Signal(object, str, str)  # (框内doc, 结论, 意见)
     compare_requested = Signal()           # → MainWindow 对照打开第二窗口
 
     def __init__(self, doc: QuoteDoc, p: TaxProfile, parent=None):
         super().__init__(parent)
         self.doc = doc
         self.p = p
+        self._approval_dialogs: list[ApprovalDialog] = []  # I1：追踪已开审批框
         # ---- 审批摘要块（doc 概况 ＋ review.summary 各字段） ----
         self.lbl_sum_config = QLabel()
         self.lbl_sum_customer = QLabel()
@@ -147,8 +150,24 @@ class ReviewView(QWidget):
 
     def _open_approval_dialog(self) -> None:
         dlg = ApprovalDialog(self.doc, self)  # 非模态；WA_DeleteOnClose 防残留（M4）
-        dlg.approval_requested.connect(self.approval_requested)
+        # I1：经转发层携框内 doc 再 re-emit（直连信号无法携带 dlg.doc）
+        dlg.approval_requested.connect(
+            lambda conclusion, opinion, d=dlg: self._relay_approval(d, conclusion, opinion))
+        self._approval_dialogs.append(dlg)
+        dlg.destroyed.connect(self._forget_approval_dialog)
         dlg.show()
+
+    def _relay_approval(self, dlg: ApprovalDialog, conclusion: str, opinion: str) -> None:
+        self.approval_requested.emit(dlg.doc, conclusion, opinion)
+
+    def _forget_approval_dialog(self, obj) -> None:
+        if obj in self._approval_dialogs:
+            self._approval_dialogs.remove(obj)
+
+    def close_approval_dialogs(self) -> None:
+        """I1：MainWindow.load_file 换 doc 时关闭绑定旧 doc 的已开审批框。"""
+        for dlg in list(self._approval_dialogs):
+            dlg.close()
 
     def refresh_summary(self) -> None:
         """刷新审批摘要＋日志表。空明细/计算错误/非有限 → 降级提示，绝不抛。"""

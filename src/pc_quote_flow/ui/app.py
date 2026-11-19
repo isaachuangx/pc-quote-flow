@@ -180,6 +180,7 @@ class MainWindow(QMainWindow):
         self.p = tax.TaxProfile()
         self.path: Path | None = None
         self._compare_windows: list["MainWindow"] = []  # 对照打开的第二窗口（M4 生命周期）
+        self._reverse_dialogs: list[ReverseDialog] = []  # I1：追踪已开反算框，换 doc 时关闭
         # 首次运行：load_profile 损坏一律 None；APPDATA 缺失抛 KeyError 视为首次运行（R17②/R22④）
         if profile is None:
             try:
@@ -400,36 +401,49 @@ class MainWindow(QMainWindow):
     def _open_reverse(self) -> None:
         dlg = ReverseDialog(self.doc, self.p, self)
         dlg.writeback_requested.connect(self._on_reverse_writeback)
+        # I1：追踪引用，load_file 换 doc 时关闭；destroyed 时移除（WA_DeleteOnClose）
+        self._reverse_dialogs.append(dlg)
+        dlg.destroyed.connect(self._forget_reverse_dialog)
         dlg.show()  # 非模态，便于对照主窗口四数
 
+    def _forget_reverse_dialog(self, obj) -> None:
+        if obj in self._reverse_dialogs:
+            self._reverse_dialogs.remove(obj)
+
     def _on_reverse_writeback(self, target: Decimal) -> None:
+        # I1：绑定框内 doc（sender），而非当前 self.doc——换 doc 后残留提交
+        # 只作用框内 doc，不得污染新 doc 定价（非模态框不随 load_file 失效的兜底）
+        dlg = self.sender()
+        doc = dlg.doc if isinstance(dlg, ReverseDialog) else self.doc
         try:
-            summary = pricing.apply_reverse(self.doc, target, self.doc.mode, self.p)
+            summary = pricing.apply_reverse(doc, target, doc.mode, self.p)
         except (ValueError, ArithmeticError) as e:
             QMessageBox.warning(self, "反算写回", f"无法反算写回：{e}")
             return
-        self.doc.logs.append(identity.make_stamp(
+        doc.logs.append(identity.make_stamp(
             self.profile, view=self.current_view(), action="反算写回",
-            summary=summary, version=self.doc.version,
+            summary=summary, version=doc.version,
         ))
         self._sync_rate_controls()
         self.refresh_pricing()
 
     # ---- 审批写回 / 对照打开（Task 9）----
-    def _on_approval_requested(self, conclusion: str, opinion: str) -> None:
+    def _on_approval_requested(self, doc: QuoteDoc, conclusion: str, opinion: str) -> None:
         """ApprovalDialog 提交 → 新鲜盖章 + review.record_approval。
 
+        I1：doc 由 ReviewView 信号携带（框内 doc），不用当前 self.doc——
+        换 doc 后残留提交只作用框内 doc，不得把审批记录落到新 doc（只增持久）。
         record_approval 内部已 append「审批记录」日志并经 states.transition 流转，
         调用方绝不重复 append（R18①）。审批只记录不做门禁（红线2）。
         """
-        round_no = len(self.doc.approvals) + 1
+        round_no = len(doc.approvals) + 1
         stamp = identity.make_stamp(
             self.profile, view=self.current_view(), action="审批记录",
             summary=f"第{round_no}轮审批：{conclusion}；意见：{opinion or '无'}",
-            version=self.doc.version,
+            version=doc.version,
         )
         try:
-            review.record_approval(self.doc, conclusion, opinion, stamp, self.p)
+            review.record_approval(doc, conclusion, opinion, stamp, self.p)
         except ValueError as e:  # 结论非法（combo 限三选，纵深守卫）
             QMessageBox.warning(self, "审批记录", f"无法记录审批：{e}")
             return
@@ -472,6 +486,11 @@ class MainWindow(QMainWindow):
         except Exception as e:  # 损坏/非法 xlsx 不崩溃
             QMessageBox.critical(self, "打开失败", f"无法读取文件：{e}")
             return
+        # I1：换 doc 前关闭绑定旧 doc 的非模态反算/审批框，防残留提交落错 doc；
+        # 处理器另绑定框内 doc（sender()/信号携 doc）双保险
+        for dlg in list(self._reverse_dialogs):
+            dlg.close()
+        self.review_view.close_approval_dialogs()
         self.doc = doc
         self.path = Path(path)
         if warnings:
@@ -610,7 +629,9 @@ class MainWindow(QMainWindow):
         )
         try:
             store.save(self.doc, work, save_stamp)
-        except OSError as e:
+        except (OSError, ArithmeticError, ValueError) as e:
+            # I3：导出已成功，后置 save 可能抛 ArithmeticError（全零成本 unit_price=0
+            # 合法 → _price DivisionUndefined）——不得漏捕崩溃，走中文错误提示
             QMessageBox.critical(self, "保存失败", f"{label}已导出，但工作文件保存失败：{e}")
             return
         self.refresh_pricing()

@@ -11,7 +11,9 @@
 低于底价只警告+导出前一次确认，绝不永久阻止（红线2，R20⑩）；空明细守卫镜像
 pricing.apply_reverse 先例（R20②）。一次导出一条日志不双重 append（R20①）；
 导出不调 store.save、不递增版本，工作文件保存是调用方职责（R20⑧）；导出文件
-直接 wb.save（一次性输出，无需原子写，R20⑨）。日志只增不改（红线4）。
+原子写（tmp+os.replace，store._atomic_write_workbook），且写成功后才改 doc
+状态/日志/溯源（终审 T6M1 取代旧 R20⑨「直接 wb.save」：写失败不得留幻影审计；
+审批文件内嵌本次留痕，先改后写、失败全量回滚）。日志只增不改（红线4）。
 """
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -74,11 +76,6 @@ def export_customer(
     below_floor = dp.quote < dp.floor
     if below_floor and not confirmed:
         raise NeedsConfirmation("整机报价低于底价，需确认后导出")
-    stamp.action = "导出客户报价单"
-    if below_floor:
-        stamp.summary = f"{stamp.summary}；低于底价确认导出" if stamp.summary else "低于底价确认导出"
-    states.transition(doc, "已报价", stamp)
-    _stamp_provenance(doc, stamp, "客户报价单")
     quote = dp.quote.quantize(Decimal("1"), rounding=ROUND_HALF_UP) if round_to_yuan else dp.quote
     wb, ws = _single_sheet("客户报价单")
     for row in (
@@ -97,8 +94,13 @@ def export_customer(
         ws.append(["部件名", "型号", "数量", "件报价"])
         for ln, q in zip(doc.lines, dp.line_quotes):
             ws.append([ln.name, ln.model, ln.qty, str(q)])
-    wb.save(Path(path))
-    wb.close()
+    # T6M1：原子写成功后才改 doc（状态/日志/溯源）——写失败 doc 与 stamp 零改动
+    store._atomic_write_workbook(wb, Path(path))
+    stamp.action = "导出客户报价单"
+    if below_floor:
+        stamp.summary = f"{stamp.summary}；低于底价确认导出" if stamp.summary else "低于底价确认导出"
+    states.transition(doc, "已报价", stamp)
+    _stamp_provenance(doc, stamp, "客户报价单")
 
 
 def export_approval(doc: QuoteDoc, path: Path, stamp: LogEntry) -> None:
@@ -112,6 +114,11 @@ def export_approval(doc: QuoteDoc, path: Path, stamp: LogEntry) -> None:
     # 先校验后写：定价/摘要可能 ValueError（非法模式/票种/日期），此时 doc 零改动
     dp = pricing.price_doc(doc.lines, doc.mode, doc.unified_rate, TaxProfile())
     s = review.summary(doc, TaxProfile())
+    # T6M1：审批文件内嵌本次流转日志/溯源/状态，必须先改后写；
+    # 快照全部 mutation，原子写失败时全量回滚（doc 与 stamp 恢复原样，无幻影审计）
+    old_status = doc.status
+    old_prov = (doc.last_export_by, doc.last_export_time, doc.last_export_type)
+    old_action = stamp.action
     stamp.action = "导出审批文件"
     states.transition(doc, "待审批", stamp)
     _stamp_provenance(doc, stamp, "审批文件")
@@ -134,8 +141,14 @@ def export_approval(doc: QuoteDoc, path: Path, stamp: LogEntry) -> None:
         ("版本", str(s.version)),
     ):
         ws.append(row)
-    wb.save(Path(path))
-    wb.close()
+    try:
+        store._atomic_write_workbook(wb, Path(path))
+    except Exception:
+        doc.status = old_status
+        doc.logs.pop()
+        doc.last_export_by, doc.last_export_time, doc.last_export_type = old_prov
+        stamp.action = old_action
+        raise
 
 
 def export_purchase(doc: QuoteDoc, path: Path, stamp: LogEntry) -> None:
@@ -157,9 +170,6 @@ def export_purchase(doc: QuoteDoc, path: Path, stamp: LogEntry) -> None:
             "", "",  # 订单号/实际成交价恒留空供采购填写（即便 doc 有值，R20⑦）
             ln.note,
         ])
-    stamp.action = "导出采购单"
-    doc.logs.append(stamp)
-    _stamp_provenance(doc, stamp, "采购单")
     wb, ws = _single_sheet("采购单")
     for row in (
         ("配置名", doc.config_name),
@@ -174,5 +184,8 @@ def export_purchase(doc: QuoteDoc, path: Path, stamp: LogEntry) -> None:
     ws.append(["部件名", "型号", "数量", "含税成本单价", "确认价", "发票类型", "供应商", "平台", "商品链接", "订单号", "实际成交价", "备注"])
     for row in rows:
         ws.append(row)
-    wb.save(Path(path))
-    wb.close()
+    # T6M1：原子写成功后才 append 日志/溯源——写失败 doc 与 stamp 零改动
+    store._atomic_write_workbook(wb, Path(path))
+    stamp.action = "导出采购单"
+    doc.logs.append(stamp)
+    _stamp_provenance(doc, stamp, "采购单")

@@ -104,7 +104,10 @@ def apply_reverse(doc: QuoteDoc, target: Decimal, mode: str, p: TaxProfile) -> s
     _check_mode(mode)
     if not doc.lines:
         raise ValueError("部件明细为空，无法反算写回")
-    floor = price_doc(doc.lines, mode, doc.unified_rate, p).floor
+    # T3M1：floor 直接 Σ全精度 floor_contrib 再 fen——与 price_doc.floor 逐位一致，
+    # 但绕开 line_quote 的率校验：当前模式/件率≥1 不得阻止「本应替换这些率」的反算
+    floor = fen(sum((tax.floor_contrib(ln.unit_price, ln.qty, ln.invoice, p)
+                     for ln in doc.lines), Decimal("0")))
     doc.unified_rate = reverse_rate(target, floor, mode)
     doc.mode = mode
     for ln in doc.lines:

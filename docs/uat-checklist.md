@@ -9,8 +9,9 @@
 ## 准备
 
 - [ ] 打包产物就绪：`dist/pc-quote-flow.exe`（单文件、双击即用，无控制台窗口）。
-- [ ] 可选预检（命令行）：`dist\pc-quote-flow.exe --selftest` 后 `echo %errorlevel%`
-      应为 **0**，且 `%TEMP%\pc-quote-flow-selftest.log` 末行为 **SELFTEST OK**。
+- [ ] 可选预检（命令行）：`dist/pc-quote-flow.exe --selftest` 后查看退出码——
+      git-bash 用 `echo $?`，cmd 用 `echo %errorlevel%`，应为 **0**；
+      且 `$TEMP/pc-quote-flow-selftest.log`（cmd 语境 `%TEMP%\pc-quote-flow-selftest.log`）末行为 **SELFTEST OK**。
 - [ ] 把样例**复制**到 `data/` 再验收（避免改动仓库内样例）：
       `samples/虚构配置B.xlsx` → `data/虚构配置B.xlsx`（`data/` 不存在则新建）。
 - [ ] 导出文件建议保存到 `data/` 或 `exports/`（均已 .gitignore 排除）。
