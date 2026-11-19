@@ -8,14 +8,15 @@
   Σ floor_contrib 全精度求和后 fen() 到分；
 - 真实利润走 pricing.actuals（实际→确认→成本回退链），eroded/negative 仅提示。
 低于底价仅红字警告，绝不 disable 任何操作（红线2 无权限门禁）；审批状态只读展示。
-商品链接列只读，双击经 QDesktopServices.openUrl 打开（不走编辑）。
+商品链接列可编辑（R43 采购确认货源）：双击回归默认编辑（粘贴/填写），
+右键「打开链接」经 QDesktopServices.openUrl 打开浏览器核价。
 编辑留痕经 model.edited 信号交 MainWindow 盖章（视图一律 current_view() 长名，R23①）。
 """
 from decimal import Decimal
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QGridLayout, QLabel, QTableView, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QLabel, QMenu, QTableView, QVBoxLayout, QWidget
 
 from .. import pricing, tax
 from ..money import fen
@@ -77,7 +78,9 @@ class PurchaseView(QWidget):
         self.model = QuoteTableModel(doc, "采购", p)
         self.table.setModel(self.model)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.doubleClicked.connect(self._on_double_clicked)
+        # R43：链接列可编辑（双击默认编辑）；打开浏览器改走右键「打开链接」
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
         # 警告标签（确认后底价 > 客户报价 → 可见；绝不 disable 导出，红线2）
         self.lbl_warning = QLabel(_WARN_BELOW_CONFIRMED)
         self.lbl_warning.setObjectName("lbl_warning")
@@ -174,8 +177,8 @@ class PurchaseView(QWidget):
         self.lbl_warning.setStyleSheet("color: red; font-weight: bold;")
         self.lbl_warning.show()
 
-    def _on_double_clicked(self, index) -> None:
-        """双击商品链接列 → 打开 URL（该列只读，不走编辑路径）。"""
+    def _open_link(self, index) -> None:
+        """打开商品链接 URL（仅链接列且非空；右键「打开链接」触发）。"""
         if not index.isValid():
             return
         if self.model.headerData(index.column(), Qt.Horizontal) != "商品链接":
@@ -183,3 +186,17 @@ class PurchaseView(QWidget):
         ln = self.doc.lines[index.row()]
         if ln.link:
             QDesktopServices.openUrl(QUrl(ln.link))
+
+    def _on_context_menu(self, pos) -> None:
+        """右键菜单：仅商品链接列且非空时提供「打开链接」（R43）。"""
+        idx = self.table.indexAt(pos)
+        if not idx.isValid():
+            return
+        if self.model.headerData(idx.column(), Qt.Horizontal) != "商品链接":
+            return
+        if not self.doc.lines[idx.row()].link:
+            return
+        menu = QMenu(self.table)
+        act = menu.addAction("打开链接")
+        act.triggered.connect(lambda: self._open_link(idx))
+        menu.exec(self.table.viewport().mapToGlobal(pos))

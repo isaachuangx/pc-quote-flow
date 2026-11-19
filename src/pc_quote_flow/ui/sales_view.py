@@ -4,8 +4,11 @@
 两率用 money.pct2（返回 Decimal 不带%）由本层追加 "%"。
 低于底价 → lbl_warning 红字可见，绝不 disable 任何操作（红线2/R22⑩）。
 供应商/商品链接列可由 checkbox 隐藏（R22⑨）；派生列只读由模型保证。
+R43 角色收口：成本/发票/供应商/平台/商品链接由采购录入，销售只读展示；
+商品链接双击经 QDesktopServices.openUrl 打开浏览器看采购货源（不能改）。
 """
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QTableView, QVBoxLayout, QWidget,
@@ -78,6 +81,8 @@ class SalesView(QWidget):
         self.model = QuoteTableModel(doc, "销售", p)
         self.table.setModel(self.model)
         self.table.horizontalHeader().setStretchLastSection(True)
+        # R43：商品链接只读展示，双击打开浏览器看采购货源
+        self.table.doubleClicked.connect(self._on_double_clicked)
         self.chk_supplier.toggled.connect(self._sync_hidden)
         self.chk_link.toggled.connect(self._sync_hidden)
         # 低于底价警告（红字，常显不门禁）
@@ -99,6 +104,16 @@ class SalesView(QWidget):
         self.model = QuoteTableModel(doc, "销售", self.p)
         self.table.setModel(self.model)
         self._sync_hidden()
+
+    def _on_double_clicked(self, index) -> None:
+        """双击商品链接列 → 打开 URL（R43：销售只读看采购货源，不走编辑路径）。"""
+        if not index.isValid():
+            return
+        if self.model.headerData(index.column(), Qt.Horizontal) != "商品链接":
+            return
+        ln = self.doc.lines[index.row()]
+        if ln.link:
+            QDesktopServices.openUrl(QUrl(ln.link))
 
     def _sync_hidden(self) -> None:
         hdr = {self.model.headerData(c, Qt.Horizontal): c for c in range(self.model.columnCount())}

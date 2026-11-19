@@ -12,15 +12,17 @@ from decimal import Decimal as D
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
+import pc_quote_flow.ui.purchase_view as pvmod
 from pc_quote_flow import identity, model, store, tax
 from pc_quote_flow.ui.app import MainWindow
 from pc_quote_flow.ui.dialogs import ApprovalDialog, ReverseDialog
 from pc_quote_flow.ui.purchase_view import PurchaseView
 from pc_quote_flow.ui.review_view import ReviewView
+from pc_quote_flow.ui.sales_view import SalesView
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_B = REPO_ROOT / "samples" / "虚构配置B.xlsx"
@@ -61,27 +63,153 @@ def msgbox(monkeypatch):
 
 
 def test_purchase_link_opens(qtbot, reg_profile, cfg_b_lines, monkeypatch):
-    """采购视图双击商品链接 → QDesktopServices.openUrl（该列只读，不走编辑）。"""
+    """R43：采购商品链接可编辑（双击回归默认编辑，不再打开浏览器）；
+    右键「打开链接」→ QDesktopServices.openUrl。
+    hang-safe：直构 PurchaseView（不走 MainWindow 事件循环）；右键菜单用 FakeMenu
+    同步 trigger（offscreen 下真实 QMenu.exec 模态阻塞会挂起，绝不执行真实菜单）。"""
     doc = make_doc(cfg_b_lines)
     doc.lines[0].link = "https://example.com/item"
-    win = MainWindow(doc=doc)
-    qtbot.addWidget(win)
-    pv = win.purchase_view
+    pv = PurchaseView(doc, tax.TaxProfile())
+    qtbot.addWidget(pv)
     m = pv.model
     h = hdr(m)
     idx = m.index(0, h["商品链接"])
-    assert not (m.flags(idx) & Qt.ItemIsEditable)  # 链接列只读（不在采购可编辑白名单）
+    assert m.flags(idx) & Qt.ItemIsEditable  # R43：链接归采购编辑
+    assert pv.table.contextMenuPolicy() == Qt.CustomContextMenu
+    assert not hasattr(pv, "_on_double_clicked")  # 双击打开已移除，回归默认编辑
     captured = []
     monkeypatch.setattr(QDesktopServices, "openUrl",
                         staticmethod(lambda url: captured.append(url.toString()) or True))
+    # 双击不再打开链接（编辑路径；内联编辑器非模态，offscreen 安全）
     pv.table.doubleClicked.emit(idx)
+    assert captured == []
+    # 打开逻辑直测：链接列 → openUrl；其他列/空链接 → 不打开
+    pv._open_link(idx)
+    assert captured == ["https://example.com/item"]
+    pv._open_link(m.index(0, h["确认价"]))
+    assert captured == ["https://example.com/item"]
+    doc.lines[1].link = ""
+    pv._open_link(m.index(1, h["商品链接"]))
+    assert captured == ["https://example.com/item"]
+
+    # 右键接线：FakeMenu 记录 addAction 并同步 trigger「打开链接」（QAction.trigger 直连不阻塞）
+    class FakeMenu:
+        def __init__(self, parent=None):
+            self._acts = []
+
+        def addAction(self, text):
+            a = QAction(text)
+            self._acts.append(a)
+            return a
+
+        def exec(self, *a, **k):
+            for act in self._acts:
+                if act.text() == "打开链接":
+                    act.trigger()
+            return None
+
+    monkeypatch.setattr(pvmod, "QMenu", FakeMenu)
+    monkeypatch.setattr(pv.table, "indexAt", lambda pos: idx)
+    pv._on_context_menu(QPoint(0, 0))
+    assert captured == ["https://example.com/item"] * 2
+    # 空链接右键 → 不建菜单、不打开
+    monkeypatch.setattr(pv.table, "indexAt", lambda pos: m.index(1, h["商品链接"]))
+    pv._on_context_menu(QPoint(0, 0))
+    assert captured == ["https://example.com/item"] * 2
+    # 非链接列右键 → 不建菜单、不打开
+    monkeypatch.setattr(pv.table, "indexAt", lambda pos: m.index(0, h["确认价"]))
+    pv._on_context_menu(QPoint(0, 0))
+    assert captured == ["https://example.com/item"] * 2
+
+
+def test_purchase_cost_source_editable_stamps(qtbot, reg_profile, cfg_b_lines):
+    """R43：成本/发票/供应商/平台/商品链接归采购编辑——setData 成功＋盖章 view=采购视图＋派生列重算。"""
+    doc = make_doc(cfg_b_lines)
+    win = MainWindow(doc=doc)
+    qtbot.addWidget(win)
+    win.show()
+    win.tabs.setCurrentIndex(1)
+    assert win.current_view() == "采购视图"
+    m = win.purchase_view.model
+    h = hdr(m)
+    n0 = len(doc.logs)
+    # 含税成本单价 1000→1100（普票）：件底价 1100×1.13=1243.00，件报价 1243×1.1=1367.30（附录B 口径）
+    assert m.flags(m.index(0, h["含税成本单价"])) & Qt.ItemIsEditable
+    assert m.setData(m.index(0, h["含税成本单价"]), "1100", Qt.EditRole)
+    assert doc.lines[0].unit_price == D("1100")
+    assert len(doc.logs) == n0 + 1
+    last = doc.logs[-1]
+    assert last.action == "编辑明细" and last.view == "采购视图"
+    assert "含税成本单价" in last.summary
+    assert m.data(m.index(0, h["件底价"]), Qt.DisplayRole) == "1243.00"
+    assert m.data(m.index(0, h["件报价"]), Qt.DisplayRole) == "1367.30"
+    assert win.lbl_floor.text() == "4243.00"   # 4130−1130+1243
+    assert win.lbl_quote.text() == "4667.30"   # 4543−1243+1367.30
+    # 发票类型/供应商/平台/商品链接：可编辑＋setData 盖章（view=采购视图）
+    for header, field, val in (
+        ("发票类型", "invoice", "专票"),
+        ("供应商", "supplier", "虚构供应商"),
+        ("平台", "platform", "虚构平台"),
+        ("商品链接", "link", "https://example.com/item"),
+    ):
+        idx = m.index(0, h[header])
+        assert m.flags(idx) & Qt.ItemIsEditable, header
+        n1 = len(doc.logs)
+        assert m.setData(idx, val, Qt.EditRole), header
+        assert getattr(doc.lines[0], field) == val, header
+        assert len(doc.logs) == n1 + 1
+        assert doc.logs[-1].view == "采购视图" and doc.logs[-1].action == "编辑明细"
+        assert header in doc.logs[-1].summary
+
+
+def test_sales_cost_source_readonly(qtbot, reg_profile, cfg_b_lines):
+    """R43：销售视图成本/发票/供应商/平台/商品链接只读（flags 无编辑位、setData 拒写）；
+    部件名/型号/数量/单项利润率仍可编辑。直构 SalesView，避免 MainWindow 事件循环。"""
+    doc = make_doc(cfg_b_lines)
+    sv = SalesView(doc, tax.TaxProfile())
+    qtbot.addWidget(sv)
+    m = sv.model
+    h = hdr(m)
+    ln = doc.lines[0]
+    for header, field in (
+        ("含税成本单价", "unit_price"), ("发票类型", "invoice"),
+        ("供应商", "supplier"), ("平台", "platform"), ("商品链接", "link"),
+    ):
+        idx = m.index(0, h[header])
+        assert not (m.flags(idx) & Qt.ItemIsEditable), header
+        old = getattr(ln, field)
+        n0 = len(doc.logs)
+        assert not m.setData(idx, "9999" if field == "unit_price" else "虚构改值", Qt.EditRole), header
+        assert getattr(ln, field) == old, header
+        assert len(doc.logs) == n0
+    for header in ("部件名", "型号", "数量", "单项利润率"):
+        assert m.flags(m.index(0, h[header])) & Qt.ItemIsEditable, header
+    # 销售仍可编辑部件配置（数量 1→2 成功写入）
+    assert m.setData(m.index(0, h["数量"]), "2", Qt.EditRole)
+    assert ln.qty == 2
+
+
+def test_sales_link_opens(qtbot, reg_profile, cfg_b_lines, monkeypatch):
+    """R43：销售视图商品链接只读展示，双击打开浏览器看采购货源（不能改）。"""
+    doc = make_doc(cfg_b_lines)
+    doc.lines[0].link = "https://example.com/item"
+    sv = SalesView(doc, tax.TaxProfile())
+    qtbot.addWidget(sv)
+    m = sv.model
+    h = hdr(m)
+    idx = m.index(0, h["商品链接"])
+    assert not (m.flags(idx) & Qt.ItemIsEditable)  # 销售只读
+    captured = []
+    monkeypatch.setattr(QDesktopServices, "openUrl",
+                        staticmethod(lambda url: captured.append(url.toString()) or True))
+    sv.table.doubleClicked.emit(idx)
     assert captured == ["https://example.com/item"]
     # 双击其他列不打开链接
-    pv.table.doubleClicked.emit(m.index(0, h["确认价"]))
+    sv.table.doubleClicked.emit(m.index(0, h["部件名"]))
     assert captured == ["https://example.com/item"]
     # 空链接双击 → 不调用 openUrl
     doc.lines[1].link = ""
-    pv.table.doubleClicked.emit(m.index(1, h["商品链接"]))
+    sv.table.doubleClicked.emit(m.index(1, h["商品链接"]))
     assert captured == ["https://example.com/item"]
 
 

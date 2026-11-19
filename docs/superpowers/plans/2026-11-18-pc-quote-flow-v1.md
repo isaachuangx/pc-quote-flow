@@ -319,7 +319,7 @@ def test_actuals_negative(cfg_b_lines):
   - `python -m pc_quote_flow [--selftest] [file.xlsx]`；`ui.app.main(argv: list[str]|None=None) -> int`
   - `--selftest`：无 GUI 跑附录A/B pricing 断言 + temp 目录 store 往返，成功 print("SELFTEST OK") 返回 0，失败返回 1。**两种输出模式（Task 10 exe 验证依赖）**：源码模式打印 stdout+退出码；windowed exe 模式无 stdout，以退出码表达结果（0=通过），并把同样的自检输出写日志到 `%TEMP%/pc-quote-flow-selftest.log`
   - `ui.app.MainWindow(path: Path|None=None)`：工具栏（当前操作人标签+切换按钮、打开/保存、视图切换 tabs 销售|采购|审阅、三导出按钮）；四数面板（QLabel：底价/客户报价/利润(不含税)/加成率/毛利率，objectName 依次 lbl_floor/lbl_quote/lbl_profit/lbl_markup/lbl_margin）；利润率输入 txt_rate + 模式 combo_mode（"成本加成"|"销售毛利率"）；明细 QTableView（QuoteTableModel）；警告标签 lbl_warning（低于底价红色可见）
-  - `ui.table_model.QuoteTableModel(doc, view: str, p)`：QAbstractTableModel；列按视图过滤（销售视图可隐藏供应商/链接，checkbox 控制）；派生列只读；销售视图可编辑：部件名/型号/数量/含税成本单价/发票类型/供应商/平台/商品链接/单项利润率；setData 后触发重算与刷新信号
+  - `ui.table_model.QuoteTableModel(doc, view: str, p)`：QAbstractTableModel；列按视图过滤（销售视图可隐藏供应商/链接，checkbox 控制）；派生列只读；销售视图可编辑：部件名/型号/数量/单项利润率（R43 角色收口：含税成本单价/发票类型/供应商/平台/商品链接归采购录入，销售只读展示）；setData 后触发重算与刷新信号
   - `ui.dialogs.RegisterDialog`（首次运行 load_profile() is None 时弹出：姓名预填 windows_account() 可编辑、角色 combo 默认"销售客服"；**Profile 四字段齐全** name/role/machine/win_account——machine=machine_name()、win_account=windows_account() 作只读 OS 锚点显示并写入 Profile，R17①）→ save_profile(Profile(name,role,machine,win_account))；load_profile 在 APPDATA 缺失时抛 KeyError（profile_dir 用 os.environ["APPDATA"]，不被其 OSError/ValueError 捕获），UI 须防御捕获 KeyError 视为首次运行（R17②）
   - `ui.dialogs.ReverseDialog(doc, p)`：输入目标价→显示反算加成率/毛利率/利润→「写回」按钮调 apply_reverse+刷新+日志
   - `ui.dialogs.SettingsDialog`：操作人姓名/角色、默认算法、有效期天数（税率 v1 固定 13% 只读显示）
@@ -342,11 +342,11 @@ def test_actuals_negative(cfg_b_lines):
 **Interfaces:**
 - Consumes: QuoteTableModel、pricing.actuals、review.summary/record_approval、identity
 - Produces:
-  - `ui.purchase_view.PurchaseView(doc, p)`：可编辑列 确认价/确认发票类型/实际成交价/实际发票类型/采购日期/订单号；商品链接列双击 → QDesktopServices.openUrl；双底价标签 lbl_floor_at_quote / lbl_floor_confirmed（确认价口径 floor_contrib，未确认件用成本价）；确认后底价 > 客户报价 → lbl_warning 红字"已低于底价，请按公司流程审批"（不阻止任何操作）；顶部审批状态只读标签；真实利润面板（actuals：real_profit/expected_profit，eroded→提示、negative→红色）
+  - `ui.purchase_view.PurchaseView(doc, p)`：可编辑列 含税成本单价/发票类型/供应商/平台/商品链接/确认价/确认发票类型/实际成交价/实际发票类型/采购日期/订单号（R43 角色收口：成本/货源归采购录入）；商品链接列双击编辑＋右键「打开链接」→ QDesktopServices.openUrl；双底价标签 lbl_floor_at_quote / lbl_floor_confirmed（确认价口径 floor_contrib，未确认件用成本价）；确认后底价 > 客户报价 → lbl_warning 红字"已低于底价，请按公司流程审批"（不阻止任何操作）；顶部审批状态只读标签；真实利润面板（actuals：real_profit/expected_profit，eroded→提示、negative→红色）
   - `ui.review_view.ReviewView(doc, p)`：全列只读（model flags 去 ItemIsEditable）；审批摘要块（summary 各字段标签）；修改日志 QTableView；「填写审批意见」按钮 → ApprovalDialog（结论 combo 同意|驳回|需调整 + 意见输入）→ record_approval + 刷新；「对照打开」按钮 → QFileDialog 选第二份文件开新 MainWindow
   - `ui.dialogs.ApprovalDialog`
 
-- [ ] **Step 1: 写失败测试** `tests/test_ui_views.py`（测试先给 CPU 行设置 link="https://example.com/item"）：test_purchase_link_opens（monkeypatch QDesktopServices.openUrl 捕获 URL，双击链接单元格→捕获==夹具链接）；test_confirmed_floor_hint（CPU 确认价 2000 普票→lbl_floor_confirmed=="5260.00"，lbl_warning 可见含"请按公司流程审批"，导出按钮仍 enabled）；test_review_readonly（ReviewView 模型 flags 无 ItemIsEditable）；test_approval_dialog_writes（ApprovalDialog 选"同意"填意见→doc.status=="采购中"、approvals 长度 1、logs 含"审批记录"）；test_erosion_hint（CPU 实际价 1050→真实利润标签"315.49"、侵蚀提示可见）
+- [ ] **Step 1: 写失败测试** `tests/test_ui_views.py`（测试先给 CPU 行设置 link="https://example.com/item"）：test_purchase_link_opens（R43：链接列可编辑、双击回归默认编辑；monkeypatch QDesktopServices.openUrl 捕获 URL，右键「打开链接」→捕获==夹具链接；FakeMenu 同步 trigger 防 offscreen 模态挂起）；test_confirmed_floor_hint（CPU 确认价 2000 普票→lbl_floor_confirmed=="5260.00"，lbl_warning 可见含"请按公司流程审批"，导出按钮仍 enabled）；test_review_readonly（ReviewView 模型 flags 无 ItemIsEditable）；test_approval_dialog_writes（ApprovalDialog 选"同意"填意见→doc.status=="采购中"、approvals 长度 1、logs 含"审批记录"）；test_erosion_hint（CPU 实际价 1050→真实利润标签"315.49"、侵蚀提示可见）
 - [ ] **Step 2: 运行确认失败** → FAIL
 - [ ] **Step 3: 实现两视图 + ApprovalDialog + app.py 接线**
 - [ ] **Step 4: 运行确认通过** → PASS（5 项）+ 全量测试绿

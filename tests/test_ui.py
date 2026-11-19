@@ -265,9 +265,12 @@ def test_model_edit_logs_and_refresh(qtbot, reg_profile):
     m = win.sales_view.model
     assert isinstance(m, QuoteTableModel)
     hdr = {m.headerData(c, Qt.Horizontal): c for c in range(m.columnCount())}
-    # 销售视图可编辑列（R22⑨ 清单逐字）
-    for h in ("部件名", "型号", "数量", "含税成本单价", "发票类型", "供应商", "平台", "商品链接", "单项利润率"):
+    # 销售视图可编辑列（R43 角色收口：仅部件配置＋利润率）
+    for h in ("部件名", "型号", "数量", "单项利润率"):
         assert m.flags(m.index(0, hdr[h])) & Qt.ItemIsEditable, h
+    # 成本/货源列归采购录入，销售只读（R43）
+    for h in ("含税成本单价", "发票类型", "供应商", "平台", "商品链接"):
+        assert not (m.flags(m.index(0, hdr[h])) & Qt.ItemIsEditable), h
     # 派生列只读
     for h in ("件底价", "件报价"):
         assert not (m.flags(m.index(0, hdr[h])) & Qt.ItemIsEditable), h
@@ -289,7 +292,7 @@ def test_model_edit_logs_and_refresh(qtbot, reg_profile):
     assert win.lbl_quote.text() == "5786.00"
     assert m.data(m.index(0, hdr["件底价"]), Qt.DisplayRole) == "2260.00"
     assert m.data(m.index(0, hdr["件报价"]), Qt.DisplayRole) == "2486.00"
-    # 非法输入拒绝（不改字段、不记日志）
-    assert not m.setData(m.index(0, hdr["含税成本单价"]), "abc", Qt.EditRole)
-    assert win.doc.lines[0].unit_price == D("1000")
+    # 非法输入拒绝（不改字段、不记日志）——用销售仍可编辑的数量列（R43 后成本列只读）
+    assert not m.setData(m.index(0, hdr["数量"]), "abc", Qt.EditRole)
+    assert win.doc.lines[0].qty == 2
     assert len(win.doc.logs) == n0 + 1

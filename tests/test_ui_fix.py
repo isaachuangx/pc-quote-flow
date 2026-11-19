@@ -7,7 +7,8 @@ Important-3：data() 只处理 DisplayRole，EditRole 返回 None→双击编辑
              空串回车清空部件名键列（store.load 将抛 StoreError）。
 
 红线1：只用虚构数据（samples/虚构配置B.xlsx）+ tmp_path + monkeypatch APPDATA。
-红线6：不放宽/跳过/删除既有断言；本文件为新增覆盖，既有 tests/test_ui.py 零改动。
+红线6：不放宽/跳过/删除既有断言；R43 角色收口把成本/货源列的编辑断言迁至采购模型
+（销售只读后原路径失去解析覆盖，迁移后覆盖不减弱）。
 GUI 离屏渲染由 conftest.py:11 设置；offscreen 不投递焦点事件，焦点离开以
 editingFinished.emit() 忠实模拟（与既有 test_ui.py 同口径，信号即焦点离开所发）。
 """
@@ -118,7 +119,7 @@ def test_rate_rejects_non_finite(qtbot, reg_profile, msgbox, bad):
 def test_model_rejects_bad_unit_price(qtbot, reg_profile, bad):
     win = MainWindow(path=SAMPLE_B)
     qtbot.addWidget(win)
-    m = win.sales_view.model
+    m = win.purchase_view.model  # R43：含税成本单价归采购编辑（销售只读）
     idx = m.index(0, _hdr(m)["含税成本单价"])
     n0 = len(win.doc.logs)
     assert not m.setData(idx, bad, Qt.EditRole), f"单价 {bad} 应拒绝"
@@ -220,12 +221,18 @@ def test_editrole_prefills_editor_via_delegate(qtbot, reg_profile):
     qtbot.addWidget(win)
     m = win.sales_view.model
     hdr = _hdr(m)
-    # 样例供应商为空，先经合法编辑填值
-    assert m.setData(m.index(0, hdr["供应商"]), "虚构供应商", Qt.EditRole)
+    # R43：供应商归采购编辑——样例供应商为空，先经采购模型合法编辑填值
+    pm = win.purchase_view.model
+    phdr = _hdr(pm)
+    assert pm.setData(pm.index(0, phdr["供应商"]), "虚构供应商", Qt.EditRole)
+    # 样例型号/单项利润率为空，先经销售可编辑列填值（预填断言要求非空显示值）
+    assert m.setData(m.index(0, hdr["型号"]), "虚构型号", Qt.EditRole)
+    assert m.setData(m.index(0, hdr["单项利润率"]), "12", Qt.EditRole)
     tv = win.sales_view.table
     delegate = tv.itemDelegate()
     assert isinstance(delegate, QStyledItemDelegate)
-    for h in ("数量", "部件名", "含税成本单价", "供应商", "发票类型"):
+    # 销售可编辑列（R43：仅部件配置＋利润率）的真实 delegate 链预填
+    for h in ("数量", "部件名", "型号", "单项利润率"):
         idx = m.index(0, hdr[h])
         disp = m.data(idx, Qt.DisplayRole)
         assert disp, h
@@ -233,6 +240,22 @@ def test_editrole_prefills_editor_via_delegate(qtbot, reg_profile):
         editor = delegate.createEditor(tv, QStyleOptionViewItem(), idx)
         try:
             delegate.setEditorData(editor, idx)
+            assert isinstance(editor, QLineEdit), h
+            assert editor.text() == disp, f"{h} 双击编辑器应预填当前值而非空串"
+        finally:
+            editor.deleteLater()
+    # 采购可编辑列（R43：成本/货源）同样经真实 delegate 链预填
+    ptv = win.purchase_view.table
+    pdelegate = ptv.itemDelegate()
+    assert isinstance(pdelegate, QStyledItemDelegate)
+    for h in ("含税成本单价", "供应商", "发票类型"):
+        idx = pm.index(0, phdr[h])
+        disp = pm.data(idx, Qt.DisplayRole)
+        assert disp, h
+        assert pm.data(idx, Qt.EditRole) == disp, f"{h} EditRole 应返回与 DisplayRole 同值"
+        editor = pdelegate.createEditor(ptv, QStyleOptionViewItem(), idx)
+        try:
+            pdelegate.setEditorData(editor, idx)
             assert isinstance(editor, QLineEdit), h
             assert editor.text() == disp, f"{h} 双击编辑器应预填当前值而非空串"
         finally:
@@ -277,9 +300,10 @@ def test_empty_name_commit_rejected_and_store_roundtrip(qtbot, tmp_path, reg_pro
 
 def test_empty_optional_str_still_allowed(qtbot, reg_profile):
     # 防过度拒绝：可选文本字段（供应商）允许清空，只有部件名是键列
+    # R43：供应商归采购编辑，经采购模型验证
     win = MainWindow(path=SAMPLE_B)
     qtbot.addWidget(win)
-    m = win.sales_view.model
+    m = win.purchase_view.model
     hdr = _hdr(m)
     assert m.setData(m.index(0, hdr["供应商"]), "虚构供应商", Qt.EditRole)
     n0 = len(win.doc.logs)
