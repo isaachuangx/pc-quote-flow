@@ -265,8 +265,8 @@ def test_model_edit_logs_and_refresh(qtbot, reg_profile):
     m = win.sales_view.model
     assert isinstance(m, QuoteTableModel)
     hdr = {m.headerData(c, Qt.Horizontal): c for c in range(m.columnCount())}
-    # 销售视图可编辑列（R43 角色收口：仅部件配置＋利润率）
-    for h in ("部件名", "型号", "数量", "单项利润率"):
+    # 销售视图可编辑列（R43 角色收口：仅部件配置＋利润率；R46 增客户确认）
+    for h in ("部件名", "型号", "数量", "单项利润率", "客户确认"):
         assert m.flags(m.index(0, hdr[h])) & Qt.ItemIsEditable, h
     # 成本/货源列归采购录入，销售只读（R43）
     for h in ("含税成本单价", "发票类型", "供应商", "平台", "商品链接"):

@@ -27,6 +27,7 @@ _SALES_COLS = [
     ("平台", "platform", "str"),
     ("商品链接", "link", "str"),
     ("单项利润率", "item_rate", "pct?"),
+    ("客户确认", "customer_confirmed", "bool"),  # R46 销售侧状态标签（采购/审阅只读展示）
     ("件底价", "line_floors", "derived"),
     ("件报价", "line_quotes", "derived"),
 ]
@@ -38,6 +39,7 @@ _PURCHASE_COLS = _SALES_COLS[:9] + [
     ("实际成交价", "actual_price", "dec?"),
     ("实际发票类型", "actual_invoice", "invoice?"),
     ("采购日期", "purchase_date", "str"),
+    ("客户确认", "customer_confirmed", "bool"),  # R46 只读展示（编辑权在销售视图）
     ("订单号", "order_no", "str"),
     ("报价尾差调整", "quote_adjust", "dec"),
     ("件底价", "line_floors", "derived"),
@@ -48,11 +50,15 @@ _COLUMNS = {"销售": _SALES_COLS, "采购": _PURCHASE_COLS, "审阅": _PURCHASE
 # 各视图可编辑表头（R43 角色收口：成本/发票/供应商/平台/链接归采购录入，销售只读；
 # 审阅只读 spec §13.10。这是 UI 编辑权划分，不是权限门禁——红线2 仍生效）
 _EDITABLE = {
-    "销售": {"部件名", "型号", "数量", "单项利润率"},
+    # R46：销售增「客户确认」（状态标签勾选；采购/审阅只读，沿用视图编辑权划分）
+    "销售": {"部件名", "型号", "数量", "单项利润率", "客户确认"},
     "采购": {"含税成本单价", "发票类型", "供应商", "平台", "商品链接",
              "确认价", "确认发票类型", "实际成交价", "实际发票类型", "采购日期", "订单号"},
     "审阅": set(),
 }
+
+# R46 报价/成本字段：变更即自动撤销该件「客户确认」（仅状态标签＋聚合，不动定价数学）
+_REVOKE_FIELDS = {"qty", "unit_price", "item_rate", "confirm_price"}
 
 
 class QuoteTableModel(QAbstractTableModel):
@@ -106,10 +112,18 @@ class QuoteTableModel(QAbstractTableModel):
         # 取 EditRole 预填编辑器，返回 None 会弹空编辑器（空串回车可清空部件名键列）。
         # 各列解析口径自洽：pct? 显示 pct2/编辑 ÷100、bool 显示是否/编辑 ==是、
         # invoice 双向归一化、int/dec str 往返；derived 由 flags 挡编辑不可达。
-        if not index.isValid() or role not in (Qt.DisplayRole, Qt.EditRole):
+        if not index.isValid():
             return None
         ln = self.doc.lines[index.row()]
         _, field, kind = self.cols[index.column()]
+        if role == Qt.CheckStateRole:
+            # R46「客户确认」渲染为勾选框（销售视图可勾；采购/审阅只读展示）；
+            # 遗留「价格已确认」保持文本是/否不动
+            if kind == "bool" and field == "customer_confirmed":
+                return Qt.Checked if getattr(ln, field) else Qt.Unchecked
+            return None
+        if role not in (Qt.DisplayRole, Qt.EditRole):
+            return None
         if kind == "derived":
             if self._dp is None:
                 return ""
@@ -133,11 +147,19 @@ class QuoteTableModel(QAbstractTableModel):
         return f
 
     def setData(self, index, value, role=Qt.EditRole) -> bool:
-        if not index.isValid() or role != Qt.EditRole:
+        if not index.isValid():
+            return False
+        header, field, kind = self.cols[index.column()]
+        if role == Qt.CheckStateRole:
+            # R46「客户确认」勾选写入（仅销售视图可编辑；采购/审阅由 flags 拒写）
+            if field != "customer_confirmed" or not (self.flags(index) & Qt.ItemIsEditable):
+                return False
+            value = "是" if value == Qt.Checked else "否"
+            role = Qt.EditRole
+        if role != Qt.EditRole:
             return False
         if not (self.flags(index) & Qt.ItemIsEditable):
             return False
-        header, field, kind = self.cols[index.column()]
         ln = self.doc.lines[index.row()]
         try:
             new = self._parse(kind, value)
@@ -161,10 +183,15 @@ class QuoteTableModel(QAbstractTableModel):
             return False
         old_disp = self.data(index, Qt.DisplayRole)
         setattr(ln, field, new)
+        # R46 自动撤销：报价/成本字段变更 → 该件客户确认失效（摘要留痕，状态由 MainWindow 聚合）
+        revoked = ""
+        if field in _REVOKE_FIELDS and ln.customer_confirmed:
+            ln.customer_confirmed = False
+            revoked = "（客户确认已撤销：报价/成本字段变更）"
         self.dataChanged.emit(index, index)
         self.refresh()
         new_disp = self.data(index, Qt.DisplayRole)
-        self.edited.emit(f"{ln.name}：{header} {old_disp or '空'}→{new_disp or '空'}")
+        self.edited.emit(f"{ln.name}：{header} {old_disp or '空'}→{new_disp or '空'}{revoked}")
         return True
 
     @staticmethod

@@ -10,8 +10,11 @@ from decimal import Decimal as D
 
 import openpyxl
 import pytest
+from PySide6.QtCore import Qt
 
-from pc_quote_flow import exports, identity, model, store
+from pc_quote_flow import exports, identity, model, store, tax
+from pc_quote_flow.ui.app import MainWindow
+from pc_quote_flow.ui.dialogs import ReverseDialog
 
 CREATOR = identity.Profile("虚构操作员", "销售客服", "XU-PC", "xuni")
 
@@ -139,3 +142,205 @@ def test_customer_purchase_export_isolation(cfg_b_lines, tmp_path):
             for row in ws.iter_rows(values_only=True):
                 assert "客户确认" not in row, f"{p.name} 泄漏客户确认列"
         wb.close()
+
+
+# ---- UI 层：编辑权 / 聚合 / 自动撤销（R46 §3/§4）------------------------------
+
+
+@pytest.fixture
+def reg_profile(tmp_path, monkeypatch):
+    """预登记操作人（APPDATA→tmp_path）：跳过首次运行登记对话框。"""
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    p = identity.Profile("测试客服", "销售客服", "XU-PC", "xuni")
+    identity.save_profile(p)
+    return p
+
+
+def _hdr(m):
+    return {m.headerData(c, Qt.Horizontal): c for c in range(m.columnCount())}
+
+
+def test_customer_confirm_column_edit_rights(qtbot, reg_profile, cfg_b_lines):
+    """销售视图「客户确认」可编辑（文本是/否＋CheckStateRole 勾选）；采购/审阅只读拒写。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    sm = win.sales_view.model
+    idx = sm.index(0, _hdr(sm)["客户确认"])
+    assert sm.flags(idx) & Qt.ItemIsEditable
+    assert sm.data(idx, Qt.CheckStateRole) == Qt.Unchecked
+    n0 = len(win.doc.logs)
+    assert sm.setData(idx, "是", Qt.EditRole)
+    assert win.doc.lines[0].customer_confirmed is True
+    assert sm.data(idx, Qt.CheckStateRole) == Qt.Checked
+    assert len(win.doc.logs) == n0 + 1  # 单件确认未达整单聚合 → 仅编辑一条
+    # CheckStateRole 取消勾选
+    assert sm.setData(idx, Qt.Unchecked, Qt.CheckStateRole)
+    assert win.doc.lines[0].customer_confirmed is False
+    # 采购/审阅：列存在但只读（视图编辑权划分，红线2 不做身份门禁）
+    for m in (win.purchase_view.model, win.review_view.model):
+        h = _hdr(m)
+        assert "客户确认" in h
+        pidx = m.index(0, h["客户确认"])
+        assert not (m.flags(pidx) & Qt.ItemIsEditable)
+        n1 = len(win.doc.logs)
+        assert not m.setData(pidx, "是", Qt.EditRole)
+        assert not m.setData(pidx, Qt.Checked, Qt.CheckStateRole)
+        assert win.doc.lines[0].customer_confirmed is False
+        assert len(win.doc.logs) == n1
+
+
+def test_line_confirm_aggregate_status(qtbot, reg_profile, cfg_b_lines):
+    """逐件聚合：全件勾→客户已确认＋整单框勾选；取消任一件→已报价＋整单框取消。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    sm = win.sales_view.model
+    h = _hdr(sm)
+    chk = win.sales_view.chk_customer_confirm
+    assert not chk.isChecked()
+    n0 = len(win.doc.logs)
+    for r in range(9):
+        assert sm.setData(sm.index(r, h["客户确认"]), "是", Qt.EditRole)
+    assert all(ln.customer_confirmed for ln in win.doc.lines)
+    assert win.doc.status == "客户已确认"
+    assert chk.isChecked()
+    # 9 条编辑＋1 条聚合流转（询价→客户已确认 非常规，只留痕不拦截）
+    assert len(win.doc.logs) == n0 + 10
+    assert win.doc.logs[-1].action.endswith("状态流转")
+    assert "客户已确认" in win.doc.logs[-1].summary
+    # 取消第 4 件 → 聚合破坏 → 已报价
+    assert sm.setData(sm.index(3, h["客户确认"]), "否", Qt.EditRole)
+    assert win.doc.lines[3].customer_confirmed is False
+    assert win.doc.status == "已报价"
+    assert not chk.isChecked()
+    assert len(win.doc.logs) == n0 + 12  # 编辑＋流转各一条
+    # 补回第 4 件 → 重新聚合
+    assert sm.setData(sm.index(3, h["客户确认"]), "是", Qt.EditRole)
+    assert win.doc.status == "客户已确认"
+    assert chk.isChecked()
+
+
+def test_whole_order_checkbox_toggle(qtbot, reg_profile, cfg_b_lines):
+    """整单勾选框：勾→全件 True＋客户已确认；取消→全件 False＋已报价；各恰两条日志。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    chk = win.sales_view.chk_customer_confirm
+    assert chk.objectName() == "chk_customer_confirm"
+    assert not chk.isChecked()
+    n0 = len(win.doc.logs)
+    chk.click()
+    assert all(ln.customer_confirmed for ln in win.doc.lines)
+    assert win.doc.status == "客户已确认"
+    assert chk.isChecked()
+    assert len(win.doc.logs) == n0 + 2  # 勾选盖章＋聚合流转，无回环多余日志
+    assert any(g.action == "客户确认" for g in win.doc.logs[n0:])
+    n1 = len(win.doc.logs)
+    chk.click()
+    assert not any(ln.customer_confirmed for ln in win.doc.lines)
+    assert win.doc.status == "已报价"
+    assert not chk.isChecked()
+    assert len(win.doc.logs) == n1 + 2
+    assert any(g.action == "取消客户确认" for g in win.doc.logs[n1:])
+
+
+def test_auto_revoke_on_price_field_edit(qtbot, reg_profile, cfg_b_lines):
+    """报价/成本字段变更→该件确认自动撤销＋状态回已报价；供应商/链接不触发。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    chk = win.sales_view.chk_customer_confirm
+    sm, pm = win.sales_view.model, win.purchase_view.model
+    sh, ph = _hdr(sm), _hdr(pm)
+    chk.click()
+    assert win.doc.status == "客户已确认"
+    # 销售侧：数量 / 单项利润率
+    for header, val, r in (("数量", "2", 0), ("单项利润率", "12", 2)):
+        chk.click() if not chk.isChecked() else None
+        assert win.doc.status == "客户已确认"
+        n0 = len(win.doc.logs)
+        assert sm.setData(sm.index(r, sh[header]), val, Qt.EditRole)
+        assert win.doc.lines[r].customer_confirmed is False
+        assert win.doc.status == "已报价"
+        assert not chk.isChecked()
+        assert "客户确认已撤销" in win.doc.logs[-2].summary  # 编辑条含撤销摘要
+        assert len(win.doc.logs) == n0 + 2  # 编辑＋聚合流转
+    # 采购侧：含税成本单价 / 确认价
+    for header, val, r in (("含税成本单价", "1100", 1), ("确认价", "1200", 3)):
+        chk.click() if not chk.isChecked() else None
+        assert win.doc.status == "客户已确认"
+        assert pm.setData(pm.index(r, ph[header]), val, Qt.EditRole)
+        assert win.doc.lines[r].customer_confirmed is False
+        assert win.doc.status == "已报价"
+        assert "客户确认已撤销" in win.doc.logs[-2].summary
+    # 非价格字段：供应商 / 商品链接 不撤销
+    chk.click() if not chk.isChecked() else None
+    assert win.doc.status == "客户已确认"
+    n0 = len(win.doc.logs)
+    assert pm.setData(pm.index(4, ph["供应商"]), "虚构供应商", Qt.EditRole)
+    assert win.doc.lines[4].customer_confirmed is True
+    assert win.doc.status == "客户已确认"
+    assert chk.isChecked()
+    assert len(win.doc.logs) == n0 + 1  # 仅编辑，无流转
+    assert "客户确认已撤销" not in win.doc.logs[-1].summary
+    assert pm.setData(pm.index(5, ph["商品链接"]), "https://example.com/item", Qt.EditRole)
+    assert win.doc.lines[5].customer_confirmed is True
+    assert win.doc.status == "客户已确认"
+
+
+def test_rate_change_revokes_all(qtbot, reg_profile, cfg_b_lines):
+    """统一利润率改变所有件报价 → 全件撤销＋已报价。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    win.sales_view.chk_customer_confirm.click()
+    assert win.doc.status == "客户已确认"
+    win.txt_rate.setText("8")
+    win.txt_rate.editingFinished.emit()
+    assert not any(ln.customer_confirmed for ln in win.doc.lines)
+    assert win.doc.status == "已报价"
+    assert not win.sales_view.chk_customer_confirm.isChecked()
+    assert "客户确认已撤销" in win.doc.logs[-2].summary  # 修改利润率条
+
+
+def test_mode_change_revokes_all(qtbot, reg_profile, cfg_b_lines):
+    """算法模式切换改变所有件报价 → 全件撤销＋已报价。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    win.sales_view.chk_customer_confirm.click()
+    assert win.doc.status == "客户已确认"
+    win.combo_mode.setCurrentText("销售毛利率")
+    assert not any(ln.customer_confirmed for ln in win.doc.lines)
+    assert win.doc.status == "已报价"
+
+
+def test_reverse_writeback_revokes_all(qtbot, reg_profile, cfg_b_lines):
+    """反算写回改变所有件报价 → 全件撤销＋已报价。"""
+    win = MainWindow(doc=_doc(cfg_b_lines))
+    qtbot.addWidget(win)
+    win.sales_view.chk_customer_confirm.click()
+    assert win.doc.status == "客户已确认"
+    win.btn_reverse.click()
+    dlg = win.findChild(ReverseDialog)
+    assert dlg is not None
+    dlg.txt_target.setText("4555.55")
+    dlg.btn_writeback.click()
+    assert not any(ln.customer_confirmed for ln in win.doc.lines)
+    assert win.doc.status == "已报价"
+    assert win.lbl_quote.text() == "4555.55"  # 数学口径不变（附录B.6 例5）
+
+
+def test_checkbox_sync_after_load(qtbot, reg_profile, cfg_b_lines, tmp_path):
+    """打开文件后整单框按聚合刷新：部分确认→不勾；全件确认→勾选。"""
+    doc = _doc(cfg_b_lines)
+    doc.lines[0].customer_confirmed = True
+    path = tmp_path / "虚构配置B部分确认.xlsx"
+    store.save(doc, path, _stamp())
+    win = MainWindow(path=path)
+    qtbot.addWidget(win)
+    assert not win.sales_view.chk_customer_confirm.isChecked()
+    doc2 = _doc(cfg_b_lines)
+    for ln in doc2.lines:
+        ln.customer_confirmed = True
+    doc2.status = "客户已确认"
+    path2 = tmp_path / "虚构配置B全确认.xlsx"
+    store.save(doc2, path2, _stamp())
+    win.load_file(path2)
+    assert win.sales_view.chk_customer_confirm.isChecked()
+    assert win.doc.status == "客户已确认"

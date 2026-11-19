@@ -76,6 +76,13 @@ class SalesView(QWidget):
         col_row.addWidget(self.chk_supplier)
         col_row.addWidget(self.chk_link)
         col_row.addStretch(1)
+        # R46 整单客户确认：逐件「客户确认」的聚合开关
+        # （勾选=全件 customer_confirmed=True；取消=全件 False；状态由 MainWindow 流转）
+        self.chk_customer_confirm = QCheckBox("客户已确认报价")
+        self.chk_customer_confirm.setObjectName("chk_customer_confirm")
+        confirm_row = QHBoxLayout()
+        confirm_row.addWidget(self.chk_customer_confirm)
+        confirm_row.addStretch(1)
         # 明细表格
         self.table = QTableView()
         self.model = QuoteTableModel(doc, "销售", p)
@@ -94,9 +101,21 @@ class SalesView(QWidget):
         lay.addLayout(grid)
         lay.addLayout(rate_row)
         lay.addLayout(col_row)
+        lay.addLayout(confirm_row)
         lay.addWidget(self.table, 1)
         lay.addWidget(self.lbl_warning)
         self._sync_hidden()
+        self.sync_customer_confirm(doc)
+
+    def sync_customer_confirm(self, doc: QuoteDoc) -> None:
+        """R46：整单勾选框按逐件聚合刷新（全件确认才勾）。
+
+        blockSignals 防回环：程序同步不触发 toggled → 不重复盖章/流转。
+        """
+        self.chk_customer_confirm.blockSignals(True)
+        self.chk_customer_confirm.setChecked(
+            bool(doc.lines) and all(ln.customer_confirmed for ln in doc.lines))
+        self.chk_customer_confirm.blockSignals(False)
 
     def set_doc(self, doc: QuoteDoc) -> None:
         """打开新文件后重建模型（doc 引用更换，列隐藏状态保留）。"""

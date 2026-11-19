@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QPushButton, QTabWidget, QToolBar,
 )
 
-from .. import exports, identity, pricing, review, store, tax
+from .. import exports, identity, pricing, review, states, store, tax
 from ..money import pct2
 from ..model import QuoteDoc, QuoteLine
 from .dialogs import RegisterDialog, ReverseDialog, SettingsDialog
@@ -56,6 +56,17 @@ _CFG_B = [
 
 def _cfg_lines(table) -> list[QuoteLine]:
     return [QuoteLine(name=n, unit_price=Decimal(pr), invoice=inv) for n, pr, inv in table]
+
+
+def _revoke_all_customer_confirm(doc: QuoteDoc) -> int:
+    """R46 整单报价变更（统一利润率/算法模式/反算写回）→ 全件客户确认撤销。
+
+    返回撤销件数（0=无确认可撤，调用方不加摘要后缀）。仅状态标签，不动定价数学。
+    """
+    n = sum(1 for ln in doc.lines if ln.customer_confirmed)
+    for ln in doc.lines:
+        ln.customer_confirmed = False
+    return n
 
 
 def _selftest_checks() -> list[str]:
@@ -255,6 +266,8 @@ class MainWindow(QMainWindow):
         # 信号接线
         self.txt_rate.editingFinished.connect(self._on_rate_edited)
         self.combo_mode.currentTextChanged.connect(self._on_mode_changed)
+        # R46 整单客户确认勾选（聚合开关；程序同步经 blockSignals 不触发本槽）
+        self.sales_view.chk_customer_confirm.toggled.connect(self._on_customer_confirm_toggled)
         self.btn_reverse.clicked.connect(self._open_reverse)
         self.sales_view.model.edited.connect(self._on_model_edited)
         self.purchase_view.model.edited.connect(self._on_model_edited)
@@ -305,6 +318,7 @@ class MainWindow(QMainWindow):
         self.sales_view.model.refresh()
         self.purchase_view.model.refresh()
         self.review_view.model.refresh()
+        self.sales_view.sync_customer_confirm(self.doc)  # R46 整单框按聚合刷新
         self._update_title()
 
     def _show_calc_error(self, msg: str) -> None:
@@ -315,6 +329,7 @@ class MainWindow(QMainWindow):
         self.sales_view.model.refresh()
         self.purchase_view.model.refresh()
         self.review_view.model.refresh()
+        self.sales_view.sync_customer_confirm(self.doc)  # R46 整单框按聚合刷新
         self._update_title()
 
     def _sync_rate_controls(self) -> None:
@@ -357,11 +372,15 @@ class MainWindow(QMainWindow):
         if rate == old_rate:
             return
         self.doc.unified_rate = rate
+        # R46：统一利润率改变所有件报价 → 全件客户确认撤销（状态标签，不动定价数学）
+        revoked_n = _revoke_all_customer_confirm(self.doc)
+        suffix = f"（客户确认已撤销：{revoked_n}件）" if revoked_n else ""
         old_disp = str(pct2(old_rate)) if old_rate.is_finite() else "—"  # NM2 守卫
         self.doc.logs.append(identity.make_stamp(
             self.profile, view=self.current_view(), action="修改利润率",
-            summary=f"统一利润率 {old_disp}%→{pct2(rate)}%", version=self.doc.version,
+            summary=f"统一利润率 {old_disp}%→{pct2(rate)}%{suffix}", version=self.doc.version,
         ))
+        self._sync_customer_confirm_status()
         self.refresh_pricing()
 
     def _on_mode_changed(self, text: str) -> None:
@@ -383,10 +402,14 @@ class MainWindow(QMainWindow):
                 return
         old = self.doc.mode
         self.doc.mode = mode
+        # R46：算法模式改变所有件报价 → 全件客户确认撤销
+        revoked_n = _revoke_all_customer_confirm(self.doc)
+        suffix = f"（客户确认已撤销：{revoked_n}件）" if revoked_n else ""
         self.doc.logs.append(identity.make_stamp(
             self.profile, view=self.current_view(), action="修改算法模式",
-            summary=f"算法模式 {_MODE_CN[old]}→{_MODE_CN[mode]}", version=self.doc.version,
+            summary=f"算法模式 {_MODE_CN[old]}→{_MODE_CN[mode]}{suffix}", version=self.doc.version,
         ))
+        self._sync_customer_confirm_status()
         self.refresh_pricing()
 
     def _on_model_edited(self, summary: str) -> None:
@@ -395,7 +418,49 @@ class MainWindow(QMainWindow):
             self.profile, view=self.current_view(), action="编辑明细",
             summary=summary, version=self.doc.version,
         ))
+        self._sync_customer_confirm_status()  # R46 逐件确认聚合 → 状态流转
         self.refresh_pricing()
+
+    # ---- R46 客户确认：整单勾选 / 聚合流转 / 自动撤销 ----
+    def _on_customer_confirm_toggled(self, checked: bool) -> None:
+        """整单「客户已确认报价」勾选 → 全件 customer_confirmed 置位＋盖章＋聚合流转。
+
+        程序同步经 sync_customer_confirm 的 blockSignals 不触发本槽（防回环）。
+        """
+        for ln in self.doc.lines:
+            ln.customer_confirmed = checked
+        self.doc.logs.append(identity.make_stamp(
+            self.profile, view=self.current_view(),
+            action="客户确认" if checked else "取消客户确认",
+            summary=("整单勾选：全部部件客户确认" if checked
+                     else "整单取消：全部部件客户确认撤销"),
+            version=self.doc.version,
+        ))
+        self._sync_customer_confirm_status()
+        self.refresh_pricing()
+
+    def _sync_customer_confirm_status(self) -> None:
+        """R46 聚合：全件确认→客户已确认；任一撤销且当前客户已确认→回已报价。
+
+        仅状态标签＋聚合，不改 pricing/tax 计算；非常规流转只留痕不拦截（红线2）。
+        """
+        if not self.doc.lines:
+            return
+        all_confirmed = all(ln.customer_confirmed for ln in self.doc.lines)
+        if all_confirmed and self.doc.status != "客户已确认":
+            self._transition_status("客户已确认", "全部部件客户确认（聚合）")
+        elif not all_confirmed and self.doc.status == "客户已确认":
+            self._transition_status("已报价", "客户确认聚合破坏（部件撤销/报价变更）")
+
+    def _transition_status(self, target: str, reason: str) -> None:
+        """R46 状态流转：states.transition 留痕（非常规加前缀），随后同步标题/状态栏。"""
+        old = self.doc.status
+        stamp = identity.make_stamp(
+            self.profile, view=self.current_view(), action="状态流转",
+            summary=f"{old}→{target}：{reason}", version=self.doc.version,
+        )
+        states.transition(self.doc, target, stamp)
+        self._update_title()
 
     # ---- 反算写回（R22①：apply_reverse 返回文本→一条盖章，不双重 append）----
     def _open_reverse(self) -> None:
@@ -420,11 +485,17 @@ class MainWindow(QMainWindow):
         except (ValueError, ArithmeticError) as e:
             QMessageBox.warning(self, "反算写回", f"无法反算写回：{e}")
             return
+        # R46：反算写回改变所有件报价 → 全件客户确认撤销（作用于框内 doc）
+        revoked_n = _revoke_all_customer_confirm(doc)
+        if revoked_n:
+            summary += f"（客户确认已撤销：{revoked_n}件）"
         doc.logs.append(identity.make_stamp(
             self.profile, view=self.current_view(), action="反算写回",
             summary=summary, version=doc.version,
         ))
         self._sync_rate_controls()
+        if doc is self.doc:
+            self._sync_customer_confirm_status()
         self.refresh_pricing()
 
     # ---- 审批写回 / 对照打开（Task 9）----
