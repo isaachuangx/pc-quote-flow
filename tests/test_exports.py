@@ -156,9 +156,11 @@ def test_approval_full_fields(cfg_b_lines, tmp_path):
     assert ov.cell(row=2, column=ov_hdr["最近导出人"]).value == "虚构销售"
     assert ov.cell(row=2, column=ov_hdr["导出时间"]).value == "2026-11-18T14:05:00"
     assert ov.cell(row=2, column=ov_hdr["版本号"]).value == 3
-    # 审批摘要：两列键值，13 字段逐行一项（13 行+表头，R20④）
+    # 审批摘要：两列键值，报价侧 13 字段逐行一项（R20④）＋R45 采购侧汇总
+    # （空行＋节标题＋8 字段＝10 行），含表头共 24 行；全部值断言不放宽
     rows = list(wb["审批摘要"].iter_rows(values_only=True))
-    assert rows[0] == ("字段", "值") and len(rows) == 14
+    assert rows[0] == ("字段", "值") and len(rows) == 24
+    assert rows[14] == (None, None) and rows[15] == ("采购侧汇总（确认价口径，B.5）", None)
     kv = dict(rows[1:])
     assert kv["整机底价"] == "4130.00" and kv["整机报价"] == "4543.00"
     assert kv["利润额(不含税)"] == "365.49" and kv["普票增值税影响"] == "130.00"
@@ -287,3 +289,29 @@ def test_empty_lines_guard(tmp_path):
         with pytest.raises(ValueError, match=f"部件明细为空，无法导出{label}"):
             fn(doc, path, sales_stamp("导出", "虚构", 0))
         assert doc.logs == [] and doc.status == "询价" and not path.exists()
+
+
+# ---- R45：审批文件「审批摘要」sheet 补采购侧汇总（报价侧 13 行不变）----
+
+
+def test_approval_file_procurement_summary(cfg_b_lines, tmp_path):
+    # CPU 确认价 2000 普票 → 审批摘要含采购侧汇总（确认后底价/真实利润/警告标记），报价侧不变
+    doc = make_doc("虚构配置B", cfg_b_lines)
+    doc.lines[0].confirm_price = D("2000")
+    doc.lines[0].confirm_invoice = "普票"
+    path = tmp_path / "b_审批.xlsx"
+    exports.export_approval(doc, path, sales_stamp("导出审批文件", "虚构：提交审批", doc.version))
+    wb = openpyxl.load_workbook(path)
+    kv = {r[0]: r[1] for r in wb["审批摘要"].iter_rows(values_only=True)}
+    # 采购侧汇总（确认价口径，B.5；审批阶段实际价未填）
+    assert kv["确认后底价"] == "5260.00"
+    assert kv["确认成本合计(含税)"] == "5000.00"
+    assert kv["有效不含税成本"] == "4654.87"
+    assert kv["真实利润(不含税)"] == "-634.51"
+    assert kv["报价时预期利润(不含税)"] == "365.49"
+    assert kv["利润侵蚀"] == "是"
+    assert kv["负利润警告"] == "是"
+    assert kv["报价低于确认后底价"] == "是"
+    # 报价侧 13 字段仍在且不变（红线5：审批文件含全部内部数据）
+    assert kv["整机底价"] == "4130.00" and kv["整机报价"] == "4543.00"
+    wb.close()

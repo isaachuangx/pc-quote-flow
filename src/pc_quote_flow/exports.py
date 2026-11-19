@@ -108,12 +108,15 @@ def export_approval(doc: QuoteDoc, path: Path, stamp: LogEntry) -> None:
 
     四表复用 store._build_workbook（DRY，结构/派生列/批注一致，R20⑤；内部文件
     允许批注与日志）；溯源先于建簿写入，总览即带导出人/时间/来源版本（版本号列）。
-    摘要两列键值 13 行：率用 pct2 显示、金额 str、bool→是/否、极值件转 str（R20④）。
+    摘要两列键值：报价侧 13 行（率用 pct2 显示、金额 str、bool→是/否、极值件转 str，
+    R20④）＋采购侧汇总 8 行（R45，确认价口径 B.5，消费 review.procurement_summary）。
     """
     _require_lines(doc, "审批文件")
     # 先校验后写：定价/摘要可能 ValueError（非法模式/票种/日期），此时 doc 零改动
     dp = pricing.price_doc(doc.lines, doc.mode, doc.unified_rate, TaxProfile())
     s = review.summary(doc, TaxProfile())
+    # R45：采购侧汇总（确认价口径，B.5）——先校验后写，pricing/review 抛错时 doc 零改动
+    ps = review.procurement_summary(doc, TaxProfile())
     # T6M1：审批文件内嵌本次流转日志/溯源/状态，必须先改后写；
     # 快照全部 mutation，原子写失败时全量回滚（doc 与 stamp 恢复原样，无幻影审计）
     old_status = doc.status
@@ -139,6 +142,20 @@ def export_approval(doc: QuoteDoc, path: Path, stamp: LogEntry) -> None:
         ("已过期", "是" if s.expired else "否"),
         ("有效期至", s.valid_until),
         ("版本", str(s.version)),
+    ):
+        ws.append(row)
+    # R45：采购侧汇总（确认价口径，B.5）——合并审批含采购款项合理性；仅标记不拦截（红线2）
+    ws.append([])
+    ws.append(["采购侧汇总（确认价口径，B.5）", ""])
+    for row in (
+        ("确认后底价", str(ps.confirmed_floor)),
+        ("确认成本合计(含税)", str(ps.confirmed_cost_incl)),
+        ("有效不含税成本", str(ps.cost_excl)),
+        ("真实利润(不含税)", str(ps.real_profit)),
+        ("报价时预期利润(不含税)", str(ps.expected_profit)),
+        ("利润侵蚀", "是" if ps.eroded else "否"),
+        ("负利润警告", "是" if ps.negative else "否"),
+        ("报价低于确认后底价", "是" if ps.below_confirmed_floor else "否"),
     ):
         ws.append(row)
     try:

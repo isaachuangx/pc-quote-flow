@@ -88,6 +88,50 @@ def summary(doc: QuoteDoc, p: TaxProfile, today: date | None = None) -> Summary:
     )
 
 
+@dataclass
+class ProcurementSummary:
+    """审批摘要采购侧汇总（R45，附录B.5）：合并审批＝报价合理性＋采购款项合理性。
+
+    confirmed_floor=确认后底价（有效价 B'）；审批阶段实际价未填，回退链取确认价，
+    故即确认价口径。confirmed_cost_incl=Σ(确认价??成本价)×数量（含税，附录B 单价×数量）。
+    eroded/negative/below_confirmed_floor 仅标记不拦截（红线2）。
+    """
+
+    confirmed_floor: Decimal
+    confirmed_cost_incl: Decimal
+    cost_excl: Decimal
+    real_profit: Decimal
+    expected_profit: Decimal
+    eroded: bool
+    negative: bool
+    below_confirmed_floor: bool
+
+
+def procurement_summary(doc: QuoteDoc, p: TaxProfile) -> ProcurementSummary:
+    """采购侧汇总：消费 pricing.actuals（B.5 权威，回退链 实际→确认→成本），不新造公式。
+
+    审批阶段实际价未填，故有效价=确认价、confirmed_floor=确认后底价；
+    确认成本合计(含税)=Σ(确认价??成本价)×数量（显式循环＋Decimal("0") 起算）。
+    below_confirmed_floor=整机报价<确认后底价；eroded/negative/below 仅标记不拦截（红线2）。
+    """
+    a = pricing.actuals(doc, p)
+    dp = pricing.price_doc(doc.lines, doc.mode, doc.unified_rate, p)
+    total = Decimal("0")
+    for ln in doc.lines:
+        price = ln.confirm_price if ln.confirm_price is not None else ln.unit_price
+        total += price * ln.qty
+    return ProcurementSummary(
+        confirmed_floor=a.floor,
+        confirmed_cost_incl=fen(total),
+        cost_excl=a.cost_excl,
+        real_profit=a.real_profit,
+        expected_profit=a.expected_profit,
+        eroded=a.eroded,
+        negative=a.negative,
+        below_confirmed_floor=dp.quote < a.floor,
+    )
+
+
 def record_approval(doc: QuoteDoc, conclusion: str, opinion: str, stamp: LogEntry, p: TaxProfile) -> None:
     """记录管理层审批结论与意见并流转状态（仅记录，不做审批决策，红线2）。
 

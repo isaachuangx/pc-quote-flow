@@ -194,3 +194,51 @@ def test_expired_invalid_format(cfg_b_lines):
     doc = make_doc("虚构配置B", cfg_b_lines, valid_until="不是日期")
     with pytest.raises(ValueError):
         review.summary(doc, tax.TaxProfile(), today=date(2026, 11, 18))
+
+
+# ---- R45：审批摘要采购侧汇总（消费 pricing.actuals，附录B.5，不新造公式）----
+
+
+def test_procurement_summary_confirmed_price(cfg_b_lines):
+    # CPU 确认价 2000 普票、实际价未填：有效价=确认价口径（B.5 回退链），审批阶段即此口径
+    doc = make_doc("虚构配置B", cfg_b_lines)
+    doc.lines[0].confirm_price = D("2000")
+    doc.lines[0].confirm_invoice = "普票"
+    ps = review.procurement_summary(doc, tax.TaxProfile())
+    assert ps.confirmed_floor == D("5260.00")  # = 3000 + 2000×1.13
+    assert ps.confirmed_cost_incl == D("5000.00")  # Σ(确认价??成本价)×数量 = 2000 + 3000
+    assert ps.cost_excl == D("4654.87")  # C' = 3000/1.13 + 2000
+    assert ps.real_profit == D("-634.51")  # 4543/1.13 − C'
+    assert ps.expected_profit == D("365.49")
+    assert ps.eroded is True and ps.negative is True
+    assert ps.below_confirmed_floor is True  # 4543.00 < 5260.00，仅标记不拦截（红线2）
+
+
+def test_procurement_summary_no_confirm_fallback(cfg_b_lines):
+    # 无确认价 → 回退报价时成本价：与报价侧口径一致，无侵蚀无负利润
+    doc = make_doc("虚构配置B", cfg_b_lines)
+    ps = review.procurement_summary(doc, tax.TaxProfile())
+    assert ps.confirmed_floor == D("4130.00")
+    assert ps.confirmed_cost_incl == D("4000.00")
+    assert ps.cost_excl == D("3654.87")
+    assert ps.real_profit == D("365.49")
+    assert ps.expected_profit == D("365.49")
+    assert ps.eroded is False and ps.negative is False
+    assert ps.below_confirmed_floor is False
+
+
+def test_procurement_summary_actual_price_chain(cfg_b_lines):
+    # CPU 确认价 2000＋实际价 1050 普票：有效价取实际价（B.5），confirmed_floor 钉死有效价口径
+    doc = make_doc("虚构配置B", cfg_b_lines)
+    doc.lines[0].confirm_price = D("2000")
+    doc.lines[0].confirm_invoice = "普票"
+    doc.lines[0].actual_price = D("1050")
+    doc.lines[0].actual_invoice = "普票"
+    ps = review.procurement_summary(doc, tax.TaxProfile())
+    assert ps.confirmed_floor == D("4186.50")  # = 3000 + 1050×1.13（有效价口径，非确认价 5260.00）
+    assert ps.confirmed_cost_incl == D("5000.00")  # 确认成本合计仍按 确认价??成本价（不含实际价层）
+    assert ps.cost_excl == D("3704.87")  # C' = 3000/1.13 + 1050（B.6 例6）
+    assert ps.real_profit == D("315.49")
+    assert ps.expected_profit == D("365.49")
+    assert ps.eroded is True and ps.negative is False  # 315.49 < 365.49 侵蚀，但非负
+    assert ps.below_confirmed_floor is False  # 4543.00 > 4186.50
